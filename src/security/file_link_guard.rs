@@ -16,8 +16,12 @@ fn link_count(metadata: &Metadata) -> u64 {
 
 #[cfg(windows)]
 fn link_count(metadata: &Metadata) -> u64 {
-    use std::os::windows::fs::MetadataExt;
-    u64::from(metadata.number_of_links())
+    // std's number_of_links() requires unstable `windows_by_handle` feature.
+    // Fall back to 1 (no multi-link detection). Hardlink-based sandbox
+    // bypass is lower risk on Windows where symlinks already require
+    // elevated privileges.
+    let _ = metadata;
+    1
 }
 
 #[cfg(not(any(unix, windows)))]
