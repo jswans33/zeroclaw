@@ -368,6 +368,8 @@ Preferred local pre-PR validation path (recommended, not required):
 
 Notes:
 
+- **Windows: always use `--release` for build/run/test.** Debug builds fail with `LNK1318: PDB LIMIT` due to the large dependency tree. Use `cargo build --release`, `cargo run --release -- <cmd>`, `cargo test --release`.
+- **Windows: use PowerShell for cargo, not Git Bash.** Git's `/usr/bin/link` shadows MSVC's `link.exe` in bash shells, causing linker failures.
 - Local Docker-based CI is strongly recommended when Docker is available.
 - Contributors are not blocked from opening a PR if local Docker CI is unavailable; in that case run the most relevant native checks and document what was run.
 
