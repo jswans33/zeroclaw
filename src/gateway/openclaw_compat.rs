@@ -206,6 +206,8 @@ pub async fn handle_api_chat(
                     error_message: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -241,6 +243,8 @@ pub async fn handle_api_chat(
                     error_message: Some(sanitized.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -582,6 +586,8 @@ pub async fn handle_v1_chat_completions_with_tools(
                     error_message: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -612,6 +618,8 @@ pub async fn handle_v1_chat_completions_with_tools(
                     error_message: Some(sanitized.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),

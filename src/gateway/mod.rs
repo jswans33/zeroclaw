@@ -1260,6 +1260,8 @@ fn handle_webhook_streaming(
                             error_message: None,
                             input_tokens: None,
                             output_tokens: None,
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
                         },
                     );
                     state_for_call.observer.record_metric(
@@ -1293,6 +1295,8 @@ fn handle_webhook_streaming(
                             error_message: Some(sanitized.clone()),
                             input_tokens: None,
                             output_tokens: None,
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
                         },
                     );
                     state_for_call.observer.record_metric(
@@ -1359,6 +1363,8 @@ fn handle_webhook_streaming(
                         error_message: None,
                         input_tokens: None,
                         output_tokens: None,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
                     },
                 );
                 state_for_stream.observer.record_metric(
@@ -1400,6 +1406,8 @@ fn handle_webhook_streaming(
                     error_message: Some(sanitized.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 },
             );
             state_for_stream.observer.record_metric(
@@ -1590,6 +1598,8 @@ async fn handle_webhook(
                         error_message: Some(sanitized.clone()),
                         input_tokens: None,
                         output_tokens: None,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
                     });
                 state.observer.record_metric(
                     &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1644,6 +1654,8 @@ async fn handle_webhook(
                     error_message: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1675,6 +1687,8 @@ async fn handle_webhook(
                     error_message: Some(sanitized.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),

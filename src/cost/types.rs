@@ -9,6 +9,12 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     /// Output/completion tokens
     pub output_tokens: u64,
+    /// Tokens used to create a new cache entry (Anthropic prompt caching)
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    /// Tokens read from an existing cache entry (Anthropic prompt caching)
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
     /// Total tokens
     pub total_tokens: u64,
     /// Calculated cost in USD
@@ -34,20 +40,54 @@ impl TokenUsage {
         input_price_per_million: f64,
         output_price_per_million: f64,
     ) -> Self {
+        Self::new_with_cache(
+            model,
+            input_tokens,
+            output_tokens,
+            0,
+            0,
+            input_price_per_million,
+            output_price_per_million,
+        )
+    }
+
+    /// Create a token usage record with cache token tracking.
+    ///
+    /// Cache pricing (Anthropic-specific):
+    /// - `cache_creation_input_tokens`: billed at 1.25x input rate
+    /// - `cache_read_input_tokens`: billed at 0.1x input rate
+    // TODO: multipliers are Anthropic-specific; extract to config if a second provider needs different rates
+    pub fn new_with_cache(
+        model: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
+        input_price_per_million: f64,
+        output_price_per_million: f64,
+    ) -> Self {
         let model = model.into();
         let input_price_per_million = Self::sanitize_price(input_price_per_million);
         let output_price_per_million = Self::sanitize_price(output_price_per_million);
-        let total_tokens = input_tokens.saturating_add(output_tokens);
+        let total_tokens = input_tokens
+            .saturating_add(output_tokens)
+            .saturating_add(cache_creation_input_tokens)
+            .saturating_add(cache_read_input_tokens);
 
-        // Calculate cost: (tokens / 1M) * price_per_million
         let input_cost = (input_tokens as f64 / 1_000_000.0) * input_price_per_million;
+        let cache_creation_cost =
+            (cache_creation_input_tokens as f64 / 1_000_000.0) * input_price_per_million * 1.25;
+        let cache_read_cost =
+            (cache_read_input_tokens as f64 / 1_000_000.0) * input_price_per_million * 0.1;
         let output_cost = (output_tokens as f64 / 1_000_000.0) * output_price_per_million;
-        let cost_usd = input_cost + output_cost;
+        let cost_usd = input_cost + cache_creation_cost + cache_read_cost + output_cost;
 
         Self {
             model,
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             total_tokens,
             cost_usd,
             timestamp: chrono::Utc::now(),
@@ -189,5 +229,39 @@ mod tests {
         assert_eq!(record.session_id, "session-123");
         assert!(!record.id.is_empty());
         assert_eq!(record.usage.model, "test/model");
+    }
+
+    #[test]
+    fn token_usage_with_cache_cost_calculation() {
+        // 1000 input, 500 output, 2000 cache_creation, 3000 cache_read
+        // $3/M input, $15/M output
+        // input:          (1000/1M)*3       = 0.003
+        // cache_creation: (2000/1M)*3*1.25  = 0.0075
+        // cache_read:     (3000/1M)*3*0.1   = 0.0009
+        // output:         (500/1M)*15       = 0.0075
+        // total:                            = 0.0189
+        let usage = TokenUsage::new_with_cache("test/model", 1000, 500, 2000, 3000, 3.0, 15.0);
+        assert!((usage.cost_usd - 0.0189).abs() < 0.00001);
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_creation_input_tokens, 2000);
+        assert_eq!(usage.cache_read_input_tokens, 3000);
+        assert_eq!(usage.total_tokens, 6500); // 1000+500+2000+3000
+    }
+
+    #[test]
+    fn token_usage_new_delegates_with_zero_cache() {
+        let via_new = TokenUsage::new("test/model", 1000, 500, 3.0, 15.0);
+        let via_cache = TokenUsage::new_with_cache("test/model", 1000, 500, 0, 0, 3.0, 15.0);
+        assert!((via_new.cost_usd - via_cache.cost_usd).abs() < f64::EPSILON);
+        assert_eq!(via_new.total_tokens, via_cache.total_tokens);
+    }
+
+    #[test]
+    fn token_usage_cache_only_no_regular_input() {
+        let usage = TokenUsage::new_with_cache("test/model", 0, 0, 0, 10000, 3.0, 15.0);
+        // cache_read: (10000/1M)*3*0.1 = 0.003
+        assert!((usage.cost_usd - 0.003).abs() < 0.00001);
+        assert_eq!(usage.total_tokens, 10000);
     }
 }

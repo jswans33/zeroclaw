@@ -54,6 +54,8 @@ pub struct ToolCall {
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
 }
 
 /// An LLM response that may contain text, tool calls, or both.
@@ -570,6 +572,8 @@ mod tests {
         let usage = TokenUsage::default();
         assert!(usage.input_tokens.is_none());
         assert!(usage.output_tokens.is_none());
+        assert!(usage.cache_creation_input_tokens.is_none());
+        assert!(usage.cache_read_input_tokens.is_none());
     }
 
     #[test]
@@ -580,6 +584,7 @@ mod tests {
             usage: Some(TokenUsage {
                 input_tokens: Some(100),
                 output_tokens: Some(50),
+                ..Default::default()
             }),
             reasoning_content: None,
             quota_metadata: None,

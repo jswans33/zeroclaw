@@ -148,6 +148,10 @@ struct AnthropicUsage {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,6 +424,8 @@ impl AnthropicProvider {
         let usage = response.usage.map(|u| TokenUsage {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens,
+            cache_read_input_tokens: u.cache_read_input_tokens,
         });
 
         for block in response.content {
@@ -1419,5 +1425,43 @@ mod tests {
         let caps = provider.capabilities();
         assert!(caps.vision);
         assert!(caps.native_tool_calling);
+    }
+
+    #[test]
+    fn parse_native_response_with_cache_tokens() {
+        let json = r#"{
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 2000,
+                "cache_read_input_tokens": 3000
+            }
+        }"#;
+        let response: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let parsed = AnthropicProvider::parse_native_response(response);
+        let usage = parsed.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert_eq!(usage.cache_creation_input_tokens, Some(2000));
+        assert_eq!(usage.cache_read_input_tokens, Some(3000));
+    }
+
+    #[test]
+    fn parse_native_response_cache_fields_absent() {
+        let json = r#"{
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50
+            }
+        }"#;
+        let response: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let parsed = AnthropicProvider::parse_native_response(response);
+        let usage = parsed.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert!(usage.cache_creation_input_tokens.is_none());
+        assert!(usage.cache_read_input_tokens.is_none());
     }
 }

@@ -486,6 +486,7 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         });
         let message = native_response
             .choices
@@ -581,6 +582,7 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            ..Default::default()
         });
         let message = native_response
             .choices

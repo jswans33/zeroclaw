@@ -12,6 +12,8 @@ pub struct PrometheusObserver {
     llm_requests: IntCounterVec,
     tokens_input_total: IntCounterVec,
     tokens_output_total: IntCounterVec,
+    tokens_cache_creation_total: IntCounterVec,
+    tokens_cache_read_total: IntCounterVec,
     tool_calls: IntCounterVec,
     channel_messages: IntCounterVec,
     heartbeat_ticks: prometheus::IntCounter,
@@ -54,6 +56,24 @@ impl PrometheusObserver {
             prometheus::Opts::new(
                 "zeroclaw_tokens_output_total",
                 "Total output tokens consumed",
+            ),
+            &["provider", "model"],
+        )
+        .expect("valid metric");
+
+        let tokens_cache_creation_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "zeroclaw_tokens_cache_creation_total",
+                "Total cache creation input tokens consumed",
+            ),
+            &["provider", "model"],
+        )
+        .expect("valid metric");
+
+        let tokens_cache_read_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "zeroclaw_tokens_cache_read_total",
+                "Total cache read input tokens consumed",
             ),
             &["provider", "model"],
         )
@@ -135,6 +155,12 @@ impl PrometheusObserver {
         registry
             .register(Box::new(tokens_output_total.clone()))
             .ok();
+        registry
+            .register(Box::new(tokens_cache_creation_total.clone()))
+            .ok();
+        registry
+            .register(Box::new(tokens_cache_read_total.clone()))
+            .ok();
         registry.register(Box::new(tool_calls.clone())).ok();
         registry.register(Box::new(channel_messages.clone())).ok();
         registry.register(Box::new(heartbeat_ticks.clone())).ok();
@@ -152,6 +178,8 @@ impl PrometheusObserver {
             llm_requests,
             tokens_input_total,
             tokens_output_total,
+            tokens_cache_creation_total,
+            tokens_cache_read_total,
             tool_calls,
             channel_messages,
             heartbeat_ticks,
@@ -204,6 +232,8 @@ impl Observer for PrometheusObserver {
                 success,
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
                 ..
             } => {
                 let success_str = if *success { "true" } else { "false" };
@@ -219,6 +249,16 @@ impl Observer for PrometheusObserver {
                     self.tokens_output_total
                         .with_label_values(&[provider.as_str(), model.as_str()])
                         .inc_by(*output);
+                }
+                if let Some(cache_creation) = cache_creation_input_tokens {
+                    self.tokens_cache_creation_total
+                        .with_label_values(&[provider.as_str(), model.as_str()])
+                        .inc_by(*cache_creation);
+                }
+                if let Some(cache_read) = cache_read_input_tokens {
+                    self.tokens_cache_read_total
+                        .with_label_values(&[provider.as_str(), model.as_str()])
+                        .inc_by(*cache_read);
                 }
             }
             ObserverEvent::ToolCallStart { tool: _ }
@@ -448,6 +488,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::LlmResponse {
             provider: "openrouter".into(),
@@ -457,6 +499,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(200),
             output_tokens: Some(80),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let output = obs.encode();
@@ -483,6 +527,8 @@ mod tests {
             error_message: Some("timeout".into()),
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let output = obs.encode();
@@ -492,5 +538,51 @@ mod tests {
         // Token counters should not appear (no data recorded)
         assert!(!output.contains("zeroclaw_tokens_input_total{"));
         assert!(!output.contains("zeroclaw_tokens_output_total{"));
+    }
+
+    #[test]
+    fn llm_response_tracks_cache_token_counters() {
+        let obs = PrometheusObserver::new();
+
+        obs.record_event(&ObserverEvent::LlmResponse {
+            provider: "anthropic".into(),
+            model: "claude-sonnet".into(),
+            duration: Duration::from_millis(200),
+            success: true,
+            error_message: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            cache_creation_input_tokens: Some(2000),
+            cache_read_input_tokens: Some(3000),
+        });
+
+        let output = obs.encode();
+        assert!(output.contains(
+            r#"zeroclaw_tokens_cache_creation_total{model="claude-sonnet",provider="anthropic"} 2000"#
+        ));
+        assert!(output.contains(
+            r#"zeroclaw_tokens_cache_read_total{model="claude-sonnet",provider="anthropic"} 3000"#
+        ));
+    }
+
+    #[test]
+    fn llm_response_without_cache_omits_cache_counters() {
+        let obs = PrometheusObserver::new();
+
+        obs.record_event(&ObserverEvent::LlmResponse {
+            provider: "openrouter".into(),
+            model: "claude-sonnet".into(),
+            duration: Duration::from_millis(200),
+            success: true,
+            error_message: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+
+        let output = obs.encode();
+        assert!(!output.contains("zeroclaw_tokens_cache_creation_total{"));
+        assert!(!output.contains("zeroclaw_tokens_cache_read_total{"));
     }
 }

@@ -25,6 +25,8 @@ pub struct OtelObserver {
     errors: Counter<u64>,
     request_latency: Histogram<f64>,
     tokens_used: Counter<u64>,
+    tokens_cache_creation: Counter<u64>,
+    tokens_cache_read: Counter<u64>,
     active_sessions: Gauge<u64>,
     queue_depth: Gauge<u64>,
 }
@@ -142,6 +144,16 @@ impl OtelObserver {
             .with_description("Total tokens consumed (monotonic)")
             .build();
 
+        let tokens_cache_creation = meter
+            .u64_counter("zeroclaw.tokens.cache_creation")
+            .with_description("Total cache creation input tokens (Anthropic prompt caching)")
+            .build();
+
+        let tokens_cache_read = meter
+            .u64_counter("zeroclaw.tokens.cache_read")
+            .with_description("Total cache read input tokens (Anthropic prompt caching)")
+            .build();
+
         let active_sessions = meter
             .u64_gauge("zeroclaw.sessions.active")
             .with_description("Current number of active sessions")
@@ -166,6 +178,8 @@ impl OtelObserver {
             errors,
             request_latency,
             tokens_used,
+            tokens_cache_creation,
+            tokens_cache_read,
             active_sessions,
             queue_depth,
         })
@@ -197,6 +211,8 @@ impl Observer for OtelObserver {
                 error_message: _,
                 input_tokens: _,
                 output_tokens: _,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             } => {
                 let secs = duration.as_secs_f64();
                 let attrs = [
@@ -228,6 +244,25 @@ impl Observer for OtelObserver {
                     span.set_status(Status::error(""));
                 }
                 span.end();
+
+                if let Some(cache_creation) = cache_creation_input_tokens {
+                    self.tokens_cache_creation.add(
+                        *cache_creation,
+                        &[
+                            KeyValue::new("provider", provider.clone()),
+                            KeyValue::new("model", model.clone()),
+                        ],
+                    );
+                }
+                if let Some(cache_read) = cache_read_input_tokens {
+                    self.tokens_cache_read.add(
+                        *cache_read,
+                        &[
+                            KeyValue::new("provider", provider.clone()),
+                            KeyValue::new("model", model.clone()),
+                        ],
+                    );
+                }
             }
             ObserverEvent::AgentEnd {
                 provider,
@@ -417,6 +452,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::AgentEnd {
             provider: "openrouter".into(),
@@ -497,6 +534,8 @@ mod tests {
             error_message: Some("404 Not Found".into()),
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
     }
 

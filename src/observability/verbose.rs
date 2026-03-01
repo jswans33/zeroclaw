@@ -89,6 +89,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(50),
             output_tokens: Some(25),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
         obs.record_event(&ObserverEvent::ToolCallStart {
             tool: "shell".into(),

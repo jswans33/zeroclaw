@@ -86,21 +86,32 @@ impl Observer for CostObserver {
             success: true,
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             ..
         } = event
         {
-            // Only record if we have token counts
             let input = input_tokens.unwrap_or(0);
             let output = output_tokens.unwrap_or(0);
+            let cache_creation = cache_creation_input_tokens.unwrap_or(0);
+            let cache_read = cache_read_input_tokens.unwrap_or(0);
 
-            if input == 0 && output == 0 {
+            if input == 0 && output == 0 && cache_creation == 0 && cache_read == 0 {
                 return;
             }
 
             let (input_price, output_price) = self.get_pricing(provider, model);
             let full_model_name = format!("{provider}/{model}");
 
-            let usage = TokenUsage::new(full_model_name, input, output, input_price, output_price);
+            let usage = TokenUsage::new_with_cache(
+                full_model_name,
+                input,
+                output,
+                cache_creation,
+                cache_read,
+                input_price,
+                output_price,
+            );
 
             if let Err(e) = self.tracker.record_usage(usage) {
                 tracing::warn!("Failed to record cost usage: {e}");
@@ -160,6 +171,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(1000),
             output_tokens: Some(500),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let summary = tracker.get_summary().unwrap();
@@ -181,6 +194,8 @@ mod tests {
             error_message: Some("API error".into()),
             input_tokens: Some(1000),
             output_tokens: Some(500),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let summary = tracker.get_summary().unwrap();
@@ -200,6 +215,8 @@ mod tests {
             error_message: None,
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let summary = tracker.get_summary().unwrap();
@@ -219,6 +236,8 @@ mod tests {
             error_message: None,
             input_tokens: Some(1_000_000), // 1M tokens
             output_tokens: Some(1_000_000),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let summary = tracker.get_summary().unwrap();
@@ -250,10 +269,48 @@ mod tests {
             error_message: None,
             input_tokens: Some(1_000_000),
             output_tokens: Some(0),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         });
 
         let summary = tracker.get_summary().unwrap();
         // Should use $5 input price, not default $3
         assert!((summary.session_cost_usd - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cost_observer_records_cache_tokens() {
+        let (_tmp, tracker) = create_test_tracker();
+        let mut prices = HashMap::new();
+        prices.insert(
+            "anthropic/claude-sonnet-4-20250514".into(),
+            ModelPricing {
+                input: 3.0,
+                output: 15.0,
+            },
+        );
+
+        let observer = CostObserver::new(tracker.clone(), prices);
+
+        observer.record_event(&ObserverEvent::LlmResponse {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            duration: Duration::from_millis(100),
+            success: true,
+            error_message: None,
+            input_tokens: Some(1000),
+            output_tokens: Some(500),
+            cache_creation_input_tokens: Some(2000),
+            cache_read_input_tokens: Some(3000),
+        });
+
+        let summary = tracker.get_summary().unwrap();
+        assert_eq!(summary.request_count, 1);
+        // input:          (1000/1M)*3       = 0.003
+        // cache_creation: (2000/1M)*3*1.25  = 0.0075
+        // cache_read:     (3000/1M)*3*0.1   = 0.0009
+        // output:         (500/1M)*15       = 0.0075
+        // total:                            = 0.0189
+        assert!((summary.session_cost_usd - 0.0189).abs() < 0.0001);
     }
 }

@@ -965,6 +965,11 @@ pub(crate) async fn run_tool_call_loop(
                     .as_ref()
                     .map(|u| (u.input_tokens, u.output_tokens))
                     .unwrap_or((None, None));
+                let (resp_cache_creation, resp_cache_read) = resp
+                    .usage
+                    .as_ref()
+                    .map(|u| (u.cache_creation_input_tokens, u.cache_read_input_tokens))
+                    .unwrap_or((None, None));
 
                 observer.record_event(&ObserverEvent::LlmResponse {
                     provider: provider_name.to_string(),
@@ -974,6 +979,8 @@ pub(crate) async fn run_tool_call_loop(
                     error_message: None,
                     input_tokens: resp_input_tokens,
                     output_tokens: resp_output_tokens,
+                    cache_creation_input_tokens: resp_cache_creation,
+                    cache_read_input_tokens: resp_cache_read,
                 });
 
                 let response_text = resp.text_or_empty().to_string();
@@ -1073,6 +1080,8 @@ pub(crate) async fn run_tool_call_loop(
                     error_message: Some(safe_error.clone()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 });
                 runtime_trace::record_event(
                     "llm_response",

@@ -28,6 +28,8 @@ pub enum ObserverEvent {
         error_message: Option<String>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
     },
     /// The agent session has finished.
     ///
