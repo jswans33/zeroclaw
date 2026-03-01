@@ -857,6 +857,11 @@ pub struct AgentConfig {
     /// to provide its final answer. Set to `0` for unlimited (default).
     #[serde(default)]
     pub max_tool_calls_per_turn: usize,
+    /// Enable dynamic per-message tool filtering based on keyword relevance scoring.
+    /// When enabled and no classification rule matches, tools are scored against the
+    /// user message and irrelevant tools are excluded. Default: `false`.
+    #[serde(default)]
+    pub dynamic_tool_filtering: bool,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -906,6 +911,7 @@ impl Default for AgentConfig {
             safety_heartbeat_turn_interval: default_safety_heartbeat_turn_interval(),
             tool_profile: ToolProfile::default(),
             max_tool_calls_per_turn: 0,
+            dynamic_tool_filtering: false,
         }
     }
 }
@@ -3771,6 +3777,9 @@ pub struct ClassificationRule {
     /// Higher priority rules are checked first.
     #[serde(default)]
     pub priority: i32,
+    /// Override the active tool profile when this rule matches.
+    #[serde(default)]
+    pub tool_profile: Option<ToolProfile>,
 }
 
 // ── Heartbeat ────────────────────────────────────────────────────
@@ -9142,6 +9151,51 @@ tool_profile = ["shell", "memory_recall"]
             parsed.agent.tool_profile,
             ToolProfile::Custom(vec!["shell".into(), "memory_recall".into()])
         );
+    }
+
+    #[test]
+    async fn dynamic_tool_filtering_disabled_by_default() {
+        let config = AgentConfig::default();
+        assert!(!config.dynamic_tool_filtering);
+    }
+
+    #[test]
+    async fn config_without_tool_classification_rules_works_unchanged() {
+        let raw = r#"
+default_temperature = 0.7
+[agent]
+tool_profile = "full"
+"#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert!(config.query_classification.rules.is_empty());
+        assert!(!config.agent.dynamic_tool_filtering);
+    }
+
+    #[test]
+    async fn existing_tool_profile_config_still_works() {
+        let raw = r#"
+default_temperature = 0.7
+[agent]
+tool_profile = "skill_runner"
+max_tool_calls_per_turn = 3
+"#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            config.agent.tool_profile,
+            ToolProfile::Named(ToolProfileName::SkillRunner)
+        );
+        assert_eq!(config.agent.max_tool_calls_per_turn, 3);
+    }
+
+    #[test]
+    async fn dynamic_tool_filtering_enabled_via_config() {
+        let raw = r#"
+default_temperature = 0.7
+[agent]
+dynamic_tool_filtering = true
+"#;
+        let config: Config = toml::from_str(raw).unwrap();
+        assert!(config.agent.dynamic_tool_filtering);
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
-use crate::config::schema::QueryClassificationConfig;
+use crate::config::schema::{
+    ClassificationRule, QueryClassificationConfig, ToolProfile, ToolProfileName,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassificationDecision {
     pub hint: String,
     pub priority: i32,
+    pub tool_profile: Option<ToolProfile>,
 }
 
 /// Classify a user message against the configured rules and return the
@@ -58,6 +61,7 @@ pub fn classify_with_decision(
             return Some(ClassificationDecision {
                 hint: rule.hint.clone(),
                 priority: rule.priority,
+                tool_profile: rule.tool_profile.clone(),
             });
         }
     }
@@ -65,10 +69,38 @@ pub fn classify_with_decision(
     None
 }
 
+pub fn default_tool_classification_rules() -> Vec<ClassificationRule> {
+    vec![
+        ClassificationRule {
+            hint: "simple".into(),
+            keywords: vec![
+                "hello".into(),
+                "hi".into(),
+                "hey".into(),
+                "time".into(),
+                "date".into(),
+                "weather".into(),
+                "thanks".into(),
+                "thank you".into(),
+            ],
+            max_length: Some(50),
+            priority: 1,
+            tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
+            ..Default::default()
+        },
+        ClassificationRule {
+            hint: "skill".into(),
+            keywords: vec!["run skill".into()],
+            priority: 5,
+            tool_profile: Some(ToolProfile::Named(ToolProfileName::SkillRunner)),
+            ..Default::default()
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{ClassificationRule, QueryClassificationConfig};
 
     fn make_config(enabled: bool, rules: Vec<ClassificationRule>) -> QueryClassificationConfig {
         QueryClassificationConfig { enabled, rules }
@@ -212,5 +244,77 @@ mod tests {
             .expect("classification decision expected");
         assert_eq!(decision.hint, "code");
         assert_eq!(decision.priority, 10);
+        assert_eq!(decision.tool_profile, None);
+    }
+
+    #[test]
+    fn classify_returns_tool_profile_when_rule_specifies_one() {
+        let config = make_config(
+            true,
+            vec![ClassificationRule {
+                hint: "fast".into(),
+                keywords: vec!["hello".into()],
+                tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
+                ..Default::default()
+            }],
+        );
+
+        let decision = classify_with_decision(&config, "hello world")
+            .expect("classification decision expected");
+        assert_eq!(decision.hint, "fast");
+        assert_eq!(
+            decision.tool_profile,
+            Some(ToolProfile::Named(ToolProfileName::Minimal))
+        );
+    }
+
+    #[test]
+    fn classify_returns_none_tool_profile_when_rule_omits_it() {
+        let config = make_config(
+            true,
+            vec![ClassificationRule {
+                hint: "fast".into(),
+                keywords: vec!["hello".into()],
+                ..Default::default()
+            }],
+        );
+
+        let decision = classify_with_decision(&config, "hello world")
+            .expect("classification decision expected");
+        assert_eq!(decision.tool_profile, None);
+    }
+
+    #[test]
+    fn default_classification_rules_route_simple_queries_to_minimal() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: default_tool_classification_rules(),
+        };
+        let decision = classify_with_decision(&config, "hello")
+            .expect("should match simple greeting");
+        assert_eq!(
+            decision.tool_profile,
+            Some(ToolProfile::Named(ToolProfileName::Minimal))
+        );
+
+        let decision = classify_with_decision(&config, "what time is it?")
+            .expect("should match time query");
+        assert_eq!(
+            decision.tool_profile,
+            Some(ToolProfile::Named(ToolProfileName::Minimal))
+        );
+    }
+
+    #[test]
+    fn default_classification_rules_do_not_restrict_complex_queries() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: default_tool_classification_rules(),
+        };
+        assert!(classify_with_decision(
+            &config,
+            "refactor the authentication module to use JWT tokens and add comprehensive test coverage"
+        )
+        .is_none());
     }
 }
