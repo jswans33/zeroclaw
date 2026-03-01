@@ -977,6 +977,7 @@ mod tests {
                     min_length: None,
                     max_length: None,
                     priority: 10,
+                    tool_profile: None,
                 }],
             })
             .available_hints(vec!["fast".to_string()])

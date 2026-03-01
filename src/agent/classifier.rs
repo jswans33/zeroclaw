@@ -1,9 +1,10 @@
-use crate::config::schema::QueryClassificationConfig;
+use crate::config::schema::{QueryClassificationConfig, ToolProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassificationDecision {
     pub hint: String,
     pub priority: i32,
+    pub tool_profile: Option<ToolProfile>,
 }
 
 /// Classify a user message against the configured rules and return the
@@ -58,6 +59,7 @@ pub fn classify_with_decision(
             return Some(ClassificationDecision {
                 hint: rule.hint.clone(),
                 priority: rule.priority,
+                tool_profile: rule.tool_profile.clone(),
             });
         }
     }
@@ -68,7 +70,9 @@ pub fn classify_with_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{ClassificationRule, QueryClassificationConfig};
+    use crate::config::schema::{
+        ClassificationRule, QueryClassificationConfig, ToolProfile, ToolProfileName,
+    };
 
     fn make_config(enabled: bool, rules: Vec<ClassificationRule>) -> QueryClassificationConfig {
         QueryClassificationConfig { enabled, rules }
@@ -212,5 +216,43 @@ mod tests {
             .expect("classification decision expected");
         assert_eq!(decision.hint, "code");
         assert_eq!(decision.priority, 10);
+        assert_eq!(decision.tool_profile, None);
+    }
+
+    #[test]
+    fn classify_returns_tool_profile_when_rule_specifies_one() {
+        let config = make_config(
+            true,
+            vec![ClassificationRule {
+                hint: "fast".into(),
+                keywords: vec!["hello".into()],
+                tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
+                ..Default::default()
+            }],
+        );
+
+        let decision = classify_with_decision(&config, "hello world")
+            .expect("classification decision expected");
+        assert_eq!(decision.hint, "fast");
+        assert_eq!(
+            decision.tool_profile,
+            Some(ToolProfile::Named(ToolProfileName::Minimal))
+        );
+    }
+
+    #[test]
+    fn classify_returns_none_tool_profile_when_rule_omits_it() {
+        let config = make_config(
+            true,
+            vec![ClassificationRule {
+                hint: "fast".into(),
+                keywords: vec!["hello".into()],
+                ..Default::default()
+            }],
+        );
+
+        let decision = classify_with_decision(&config, "hello world")
+            .expect("classification decision expected");
+        assert_eq!(decision.tool_profile, None);
     }
 }

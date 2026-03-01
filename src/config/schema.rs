@@ -3771,6 +3771,8 @@ pub struct ClassificationRule {
     /// Higher priority rules are checked first.
     #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
+    pub tool_profile: Option<ToolProfile>,
 }
 
 // ── Heartbeat ────────────────────────────────────────────────────
