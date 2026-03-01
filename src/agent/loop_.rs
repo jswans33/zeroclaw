@@ -75,13 +75,33 @@ fn resolve_effective_skills_mode(
     }
 }
 
-fn classify_turn_tool_profile(
+struct TurnClassification {
+    tool_filter: Option<Vec<String>>,
+    model_hint: Option<String>,
+}
+
+impl TurnClassification {
+    fn log_cascade_routing(&self, default_model: &str) {
+        if let Some(ref hint) = self.model_hint {
+            tracing::info!(
+                source = "cascade_routing",
+                hint = hint,
+                effective_model = hint.as_str(),
+                default_model = default_model,
+                "Model escalation applied"
+            );
+        }
+    }
+}
+
+fn classify_turn(
     classification_config: &QueryClassificationConfig,
     static_profile: &ToolProfile,
     message: &str,
     dynamic_filtering: bool,
     tools_registry: &[Box<dyn Tool>],
-) -> Option<Vec<String>> {
+    available_hints: &[String],
+) -> TurnClassification {
     let total_tools = tools_registry.len();
 
     // When dynamic filtering is on, ensure we have classification rules.
@@ -103,9 +123,18 @@ fn classify_turn_tool_profile(
         classification_config
     };
 
-    let classification_tool_profile =
-        super::classifier::classify_with_decision(config_ref, message)
-            .and_then(|d| d.tool_profile);
+    let decision = super::classifier::classify_with_decision(config_ref, message);
+
+    // Extract model hint if the classification matched a configured model route.
+    // Safety invariant: hints are only generated for entries in available_hints,
+    // which is built from the same config.model_routes as RouterProvider::routes.
+    // This ensures RouterProvider::resolve() will always find a matching route.
+    let model_hint = decision
+        .as_ref()
+        .filter(|d| available_hints.iter().any(|h| h == &d.hint))
+        .map(|d| format!("hint:{}", d.hint));
+
+    let classification_tool_profile = decision.and_then(|d| d.tool_profile);
     if let Some(ref override_profile) = classification_tool_profile {
         let result = override_profile.resolve();
         tracing::info!(
@@ -115,7 +144,10 @@ fn classify_turn_tool_profile(
             total = total_tools,
             "Dynamic tool filtering applied"
         );
-        return result;
+        return TurnClassification {
+            tool_filter: result,
+            model_hint,
+        };
     }
     if dynamic_filtering {
         use super::tool_selector::ToolSelector;
@@ -130,7 +162,10 @@ fn classify_turn_tool_profile(
                 tools = ?selected,
                 "Dynamic tool filtering applied"
             );
-            return Some(selected);
+            return TurnClassification {
+                tool_filter: Some(selected),
+                model_hint,
+            };
         }
     }
     tracing::debug!(
@@ -139,7 +174,10 @@ fn classify_turn_tool_profile(
         total = total_tools,
         "No dynamic filtering — using static profile"
     );
-    static_profile.resolve()
+    TurnClassification {
+        tool_filter: static_profile.resolve(),
+        model_hint,
+    }
 }
 
 fn should_treat_provider_as_vision_capable(provider_name: &str, provider: &dyn Provider) -> bool {
@@ -1947,6 +1985,12 @@ pub async fn run(
         .or(config.default_model.as_deref())
         .unwrap_or("anthropic/claude-sonnet-4");
 
+    let available_hints: Vec<String> = config
+        .model_routes
+        .iter()
+        .map(|r| r.hint.clone())
+        .collect();
+
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
@@ -2205,13 +2249,16 @@ pub async fn run(
             ChatMessage::user(&enriched),
         ];
 
-        let turn_tool_profile = classify_turn_tool_profile(
+        let classification = classify_turn(
             &config.query_classification,
             &config.agent.tool_profile,
             &msg,
             config.agent.dynamic_tool_filtering,
             &tools_registry,
+            &available_hints,
         );
+        classification.log_cascade_routing(model_name);
+        let effective_model = classification.model_hint.as_deref().unwrap_or(model_name);
 
         let ld_cfg = LoopDetectionConfig {
             no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
@@ -2237,7 +2284,7 @@ pub async fn run(
                         &tools_registry,
                         observer.as_ref(),
                         provider_name,
-                        model_name,
+                        effective_model,
                         temperature,
                         false,
                         approval_manager.as_ref(),
@@ -2248,7 +2295,7 @@ pub async fn run(
                         None,
                         None,
                         &[],
-                        turn_tool_profile.as_deref(),
+                        classification.tool_filter.as_deref(),
                         config.agent.max_tool_calls_per_turn,
                     ),
                 ),
@@ -2376,13 +2423,16 @@ pub async fn run(
                 history.push(ChatMessage::user(reminder));
             }
 
-            let turn_tool_profile = classify_turn_tool_profile(
+            let classification = classify_turn(
                 &config.query_classification,
                 &config.agent.tool_profile,
                 &user_input,
                 config.agent.dynamic_tool_filtering,
                 &tools_registry,
+                &available_hints,
             );
+            classification.log_cascade_routing(model_name);
+            let effective_model = classification.model_hint.as_deref().unwrap_or(model_name);
 
             let ld_cfg = LoopDetectionConfig {
                 no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
@@ -2408,7 +2458,7 @@ pub async fn run(
                             &tools_registry,
                             observer.as_ref(),
                             provider_name,
-                            model_name,
+                            effective_model,
                             temperature,
                             false,
                             approval_manager.as_ref(),
@@ -2419,7 +2469,7 @@ pub async fn run(
                             None,
                             None,
                             &[],
-                            turn_tool_profile.as_deref(),
+                            classification.tool_filter.as_deref(),
                             config.agent.max_tool_calls_per_turn,
                         ),
                     ),
@@ -2543,6 +2593,13 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .default_model
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
+
+    let available_hints: Vec<String> = config
+        .model_routes
+        .iter()
+        .map(|r| r.hint.clone())
+        .collect();
+
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
@@ -2684,13 +2741,19 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     };
 
     // Per-turn classification for channel messages (same as run() paths).
-    let turn_tool_profile = classify_turn_tool_profile(
+    let classification = classify_turn(
         &config.query_classification,
         &config.agent.tool_profile,
         message,
         config.agent.dynamic_tool_filtering,
         &tools_registry,
+        &available_hints,
     );
+    classification.log_cascade_routing(&model_name);
+    let effective_model = classification
+        .model_hint
+        .as_deref()
+        .unwrap_or(&model_name);
 
     let mut history = vec![
         ChatMessage::system(&system_prompt),
@@ -2714,7 +2777,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
                 &tools_registry,
                 observer.as_ref(),
                 provider_name,
-                &model_name,
+                effective_model,
                 config.default_temperature,
                 true,
                 None,
@@ -2725,7 +2788,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
                 None,
                 None,
                 &[],
-                turn_tool_profile.as_deref(),
+                classification.tool_filter.as_deref(),
                 0,
             ),
         )
@@ -2737,6 +2800,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use crate::config::ClassificationRule;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -5713,6 +5777,64 @@ Let me check the result."#;
         let config_mode = SkillsPromptInjectionMode::Compact;
         let effective = resolve_effective_skills_mode(&profile, config_mode);
         assert_eq!(effective, SkillsPromptInjectionMode::Compact);
+    }
+
+    #[test]
+    fn classify_turn_returns_hint_when_available() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: vec![ClassificationRule {
+                hint: "simple".into(),
+                keywords: vec!["hello".into()],
+                max_length: Some(50),
+                priority: 1,
+                tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
+                ..Default::default()
+            }],
+        };
+        let static_profile = ToolProfile::Named(ToolProfileName::Full);
+        let available_hints = vec!["simple".to_string()];
+
+        let result = classify_turn(
+            &config,
+            &static_profile,
+            "hello",
+            false,
+            &[],
+            &available_hints,
+        );
+
+        assert_eq!(result.model_hint, Some("hint:simple".to_string()));
+    }
+
+    #[test]
+    fn classify_turn_returns_no_hint_when_available_hints_empty() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: vec![ClassificationRule {
+                hint: "simple".into(),
+                keywords: vec!["hello".into()],
+                max_length: Some(50),
+                priority: 1,
+                tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
+                ..Default::default()
+            }],
+        };
+        let static_profile = ToolProfile::Named(ToolProfileName::Full);
+        let available_hints: Vec<String> = vec![];
+
+        let result = classify_turn(
+            &config,
+            &static_profile,
+            "hello",
+            false,
+            &[],
+            &available_hints,
+        );
+
+        assert_eq!(result.model_hint, None);
+        // Tool filter should still apply even without model routing
+        assert!(result.tool_filter.is_some());
     }
 
 }
