@@ -5687,7 +5687,16 @@ struct ActiveWorkspaceState {
     config_dir: String,
 }
 
-fn default_config_dir() -> Result<PathBuf> {
+pub(crate) fn default_config_dir() -> Result<PathBuf> {
+    // In test builds, respect HOME env var for isolation. On Windows, UserDirs::new()
+    // uses the Windows API (SHGetKnownFolderPath) which ignores HOME, so tests that
+    // set HOME to a temp dir would still resolve to the real home without this guard.
+    #[cfg(test)]
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Ok(std::path::PathBuf::from(home).join(".zeroclaw"));
+        }
+    }
     let home = UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
         .context("Could not find home directory")?;
@@ -5755,9 +5764,11 @@ async fn load_persisted_workspace_dirs(
     Ok(Some((config_dir.clone(), config_dir.join("workspace"))))
 }
 
-pub(crate) async fn persist_active_workspace_config_dir(config_dir: &Path) -> Result<()> {
-    let default_config_dir = default_config_dir()?;
-    let state_path = active_workspace_state_path(&default_config_dir);
+pub(crate) async fn persist_active_workspace_config_dir(
+    config_dir: &Path,
+    default_config_dir: &Path,
+) -> Result<()> {
+    let state_path = active_workspace_state_path(default_config_dir);
 
     // Guard: never persist a temp-directory path as the active workspace.
     // This prevents transient test runs or one-off invocations from hijacking
@@ -5783,7 +5794,7 @@ pub(crate) async fn persist_active_workspace_config_dir(config_dir: &Path) -> Re
         return Ok(());
     }
 
-    fs::create_dir_all(&default_config_dir)
+    fs::create_dir_all(default_config_dir)
         .await
         .with_context(|| {
             format!(
@@ -5817,7 +5828,7 @@ pub(crate) async fn persist_active_workspace_config_dir(config_dir: &Path) -> Re
         );
     }
 
-    sync_directory(&default_config_dir).await?;
+    sync_directory(default_config_dir).await?;
     Ok(())
 }
 
@@ -8233,6 +8244,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    #[cfg(unix)]
     use tempfile::TempDir;
     use tokio::sync::{Mutex, MutexGuard};
     use tokio::test;
@@ -11188,7 +11200,8 @@ default_model = "legacy-model"
         std::env::set_var("HOME", &temp_home);
         std::env::remove_var("ZEROCLAW_WORKSPACE");
 
-        persist_active_workspace_config_dir(&custom_config_dir)
+        let temp_default_dir = temp_home.join(".zeroclaw");
+        persist_active_workspace_config_dir(&custom_config_dir, &temp_default_dir)
             .await
             .unwrap();
 
@@ -11224,7 +11237,9 @@ default_model = "legacy-model"
 
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
-        persist_active_workspace_config_dir(&marker_config_dir)
+
+        let temp_default_dir = temp_home.join(".zeroclaw");
+        persist_active_workspace_config_dir(&marker_config_dir, &temp_default_dir)
             .await
             .unwrap();
         std::env::set_var("ZEROCLAW_WORKSPACE", &env_workspace_dir);
@@ -11255,12 +11270,12 @@ default_model = "legacy-model"
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
 
-        persist_active_workspace_config_dir(&custom_config_dir)
+        persist_active_workspace_config_dir(&custom_config_dir, &default_config_dir)
             .await
             .unwrap();
         assert!(marker_path.exists());
 
-        persist_active_workspace_config_dir(&default_config_dir)
+        persist_active_workspace_config_dir(&default_config_dir, &default_config_dir)
             .await
             .unwrap();
         assert!(!marker_path.exists());

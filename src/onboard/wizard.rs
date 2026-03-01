@@ -2201,7 +2201,8 @@ async fn persist_workspace_selection(config_path: &Path) -> Result<()> {
     let config_dir = config_path
         .parent()
         .context("Config path must have a parent directory")?;
-    crate::config::schema::persist_active_workspace_config_dir(config_dir)
+    let default_dir = crate::config::schema::default_config_dir()?;
+    crate::config::schema::persist_active_workspace_config_dir(config_dir, &default_dir)
         .await
         .with_context(|| {
             format!(
