@@ -132,6 +132,16 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,10 +493,14 @@ impl Provider for OpenRouterProvider {
         }
 
         let native_response: NativeChatResponse = response.json().await?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            ..Default::default()
+        let usage = native_response.usage.map(|u| {
+            let details = u.prompt_tokens_details.as_ref();
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cache_creation_input_tokens: details.and_then(|d| d.cache_write_tokens),
+                cache_read_input_tokens: details.and_then(|d| d.cached_tokens),
+            }
         });
         let message = native_response
             .choices
@@ -579,10 +593,14 @@ impl Provider for OpenRouterProvider {
         }
 
         let native_response: NativeChatResponse = response.json().await?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            ..Default::default()
+        let usage = native_response.usage.map(|u| {
+            let details = u.prompt_tokens_details.as_ref();
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cache_creation_input_tokens: details.and_then(|d| d.cache_write_tokens),
+                cache_read_input_tokens: details.and_then(|d| d.cached_tokens),
+            }
         });
         let message = native_response
             .choices
@@ -936,6 +954,37 @@ mod tests {
         let json = r#"{"choices": [{"message": {"content": "Hello"}}]}"#;
         let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
         assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn native_response_parses_cache_token_details() {
+        let json = r#"{
+            "choices": [{"message": {"content": "Hello"}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "prompt_tokens_details": {
+                    "cached_tokens": 80,
+                    "cache_write_tokens": 20
+                }
+            }
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.unwrap();
+        let details = usage.prompt_tokens_details.unwrap();
+        assert_eq!(details.cached_tokens, Some(80));
+        assert_eq!(details.cache_write_tokens, Some(20));
+    }
+
+    #[test]
+    fn native_response_parses_usage_without_cache_details() {
+        let json = r#"{
+            "choices": [{"message": {"content": "Hello"}}],
+            "usage": {"prompt_tokens": 42, "completion_tokens": 15}
+        }"#;
+        let resp: NativeChatResponse = serde_json::from_str(json).unwrap();
+        let usage = resp.usage.unwrap();
+        assert!(usage.prompt_tokens_details.is_none());
     }
 
     // ═══════════════════════════════════════════════════════════════════════
