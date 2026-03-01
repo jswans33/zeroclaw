@@ -1,6 +1,7 @@
 use crate::config::schema::{
     ClassificationRule, QueryClassificationConfig, ToolProfile, ToolProfileName,
 };
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassificationDecision {
@@ -69,33 +70,36 @@ pub fn classify_with_decision(
     None
 }
 
-pub fn default_tool_classification_rules() -> Vec<ClassificationRule> {
-    vec![
-        ClassificationRule {
-            hint: "simple".into(),
-            keywords: vec![
-                "hello".into(),
-                "hi".into(),
-                "hey".into(),
-                "time".into(),
-                "date".into(),
-                "weather".into(),
-                "thanks".into(),
-                "thank you".into(),
-            ],
-            max_length: Some(50),
-            priority: 1,
-            tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
-            ..Default::default()
-        },
-        ClassificationRule {
-            hint: "skill".into(),
-            keywords: vec!["run skill".into()],
-            priority: 5,
-            tool_profile: Some(ToolProfile::Named(ToolProfileName::SkillRunner)),
-            ..Default::default()
-        },
-    ]
+pub fn default_tool_classification_rules() -> &'static [ClassificationRule] {
+    static RULES: OnceLock<Vec<ClassificationRule>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        vec![
+            ClassificationRule {
+                hint: "simple".into(),
+                keywords: vec![
+                    "hello".into(),
+                    "hi".into(),
+                    "hey".into(),
+                    "time".into(),
+                    "date".into(),
+                    "weather".into(),
+                    "thanks".into(),
+                    "thank you".into(),
+                ],
+                max_length: Some(50),
+                priority: 1,
+                tool_profile: Some(ToolProfile::Named(ToolProfileName::Minimal)),
+                ..Default::default()
+            },
+            ClassificationRule {
+                hint: "skill".into(),
+                keywords: vec!["run skill".into()],
+                priority: 5,
+                tool_profile: Some(ToolProfile::Named(ToolProfileName::SkillRunner)),
+                ..Default::default()
+            },
+        ]
+    })
 }
 
 #[cfg(test)]
@@ -288,7 +292,7 @@ mod tests {
     fn default_classification_rules_route_simple_queries_to_minimal() {
         let config = QueryClassificationConfig {
             enabled: true,
-            rules: default_tool_classification_rules(),
+            rules: default_tool_classification_rules().to_vec(),
         };
         let decision = classify_with_decision(&config, "hello")
             .expect("should match simple greeting");
@@ -309,7 +313,7 @@ mod tests {
     fn default_classification_rules_do_not_restrict_complex_queries() {
         let config = QueryClassificationConfig {
             enabled: true,
-            rules: default_tool_classification_rules(),
+            rules: default_tool_classification_rules().to_vec(),
         };
         assert!(classify_with_decision(
             &config,

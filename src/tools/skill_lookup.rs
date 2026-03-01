@@ -2,17 +2,14 @@ use super::traits::{Tool, ToolResult};
 use crate::skills::Skill;
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
 
 pub struct SkillLookupTool {
-    skills: Arc<Vec<Skill>>,
+    skills: Vec<Skill>,
 }
 
 impl SkillLookupTool {
     pub fn new(skills: Vec<Skill>) -> Self {
-        Self {
-            skills: Arc::new(skills),
-        }
+        Self { skills }
     }
 }
 

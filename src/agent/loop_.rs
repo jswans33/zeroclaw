@@ -75,15 +75,6 @@ fn resolve_effective_skills_mode(
     }
 }
 
-fn resolve_effective_tool_profile(
-    static_profile: &ToolProfile,
-    classification_override: Option<&ToolProfile>,
-) -> ToolProfile {
-    classification_override
-        .cloned()
-        .unwrap_or_else(|| static_profile.clone())
-}
-
 fn classify_turn_tool_profile(
     classification_config: &QueryClassificationConfig,
     static_profile: &ToolProfile,
@@ -102,7 +93,7 @@ fn classify_turn_tool_profile(
         effective_config = QueryClassificationConfig {
             enabled: true,
             rules: if classification_config.rules.is_empty() {
-                super::classifier::default_tool_classification_rules()
+                super::classifier::default_tool_classification_rules().to_vec()
             } else {
                 classification_config.rules.clone()
             },
@@ -116,8 +107,7 @@ fn classify_turn_tool_profile(
         super::classifier::classify_with_decision(config_ref, message)
             .and_then(|d| d.tool_profile);
     if let Some(ref override_profile) = classification_tool_profile {
-        let result = resolve_effective_tool_profile(static_profile, classification_tool_profile.as_ref())
-            .resolve();
+        let result = override_profile.resolve();
         tracing::info!(
             source = "classification_rule",
             override_profile = ?override_profile,
@@ -149,7 +139,7 @@ fn classify_turn_tool_profile(
         total = total_tools,
         "No dynamic filtering — using static profile"
     );
-    resolve_effective_tool_profile(static_profile, None).resolve()
+    static_profile.resolve()
 }
 
 fn should_treat_provider_as_vision_capable(provider_name: &str, provider: &dyn Provider) -> bool {
@@ -5725,30 +5715,4 @@ Let me check the result."#;
         assert_eq!(effective, SkillsPromptInjectionMode::Compact);
     }
 
-    #[test]
-    fn resolve_effective_tool_profile_uses_classification_override() {
-        let static_profile = ToolProfile::Named(ToolProfileName::Full);
-        let classification_override = Some(ToolProfile::Named(ToolProfileName::Minimal));
-        let effective =
-            resolve_effective_tool_profile(&static_profile, classification_override.as_ref());
-        assert_eq!(effective, ToolProfile::Named(ToolProfileName::Minimal));
-    }
-
-    #[test]
-    fn resolve_effective_tool_profile_falls_back_to_static_when_no_override() {
-        let static_profile = ToolProfile::Named(ToolProfileName::Minimal);
-        let effective = resolve_effective_tool_profile(&static_profile, None);
-        assert_eq!(effective, ToolProfile::Named(ToolProfileName::Minimal));
-    }
-
-    #[test]
-    fn resolve_effective_tool_profile_custom_override_beats_named_static() {
-        let static_profile = ToolProfile::Named(ToolProfileName::Full);
-        let custom = Some(ToolProfile::Custom(vec!["shell".into(), "file_read".into()]));
-        let effective = resolve_effective_tool_profile(&static_profile, custom.as_ref());
-        assert_eq!(
-            effective,
-            ToolProfile::Custom(vec!["shell".into(), "file_read".into()])
-        );
-    }
 }

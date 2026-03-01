@@ -1,5 +1,6 @@
 use crate::config::ToolProfile;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 pub trait ToolSelector: Send + Sync {
     fn select_tools(
@@ -12,109 +13,77 @@ pub trait ToolSelector: Send + Sync {
 
 const CORE_TOOLS: &[&str] = &["shell", "file_read"];
 
+type KeywordMap = HashMap<&'static str, &'static [&'static str]>;
+
+fn default_keyword_map() -> &'static KeywordMap {
+    static MAP: OnceLock<KeywordMap> = OnceLock::new();
+    MAP.get_or_init(|| {
+        HashMap::from([
+            (
+                "file_read",
+                ["file", "read", "cat", "show", "content", "code", "source"].as_slice(),
+            ),
+            (
+                "file_write",
+                ["write", "create", "save", "new file"].as_slice(),
+            ),
+            (
+                "file_edit",
+                ["edit", "fix", "change", "modify", "update", "refactor", "bug"].as_slice(),
+            ),
+            (
+                "memory_store",
+                ["remember", "save", "store", "note"].as_slice(),
+            ),
+            (
+                "memory_recall",
+                ["recall", "remember", "what did", "history", "previous"].as_slice(),
+            ),
+            (
+                "browser_open",
+                ["browser", "webpage", "website", "url", "open page"].as_slice(),
+            ),
+            (
+                "web_search",
+                ["search", "google", "look up", "find online"].as_slice(),
+            ),
+            (
+                "web_fetch",
+                ["fetch", "download", "curl", "http get"].as_slice(),
+            ),
+            (
+                "http_request",
+                ["api", "request", "post", "endpoint", "rest"].as_slice(),
+            ),
+            (
+                "glob_search",
+                ["find file", "glob", "search files", "locate"].as_slice(),
+            ),
+            (
+                "content_search",
+                ["grep", "search content", "find in files", "pattern"].as_slice(),
+            ),
+            (
+                "gpio_read",
+                ["gpio", "pin", "hardware", "sensor", "led", "arduino", "nucleo"].as_slice(),
+            ),
+            (
+                "gpio_write",
+                ["gpio", "pin", "hardware", "led", "blink", "arduino", "nucleo"].as_slice(),
+            ),
+        ])
+    })
+}
+
 pub struct KeywordToolSelector {
-    tool_keywords: HashMap<String, Vec<String>>,
+    tool_keywords: &'static KeywordMap,
 }
 
 impl Default for KeywordToolSelector {
     fn default() -> Self {
-        let mut map = HashMap::new();
-        map.insert(
-            "file_read".into(),
-            vec!["file", "read", "cat", "show", "content", "code", "source"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "file_write".into(),
-            vec!["write", "create", "save", "new file"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "file_edit".into(),
-            vec!["edit", "fix", "change", "modify", "update", "refactor", "bug"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "memory_store".into(),
-            vec!["remember", "save", "store", "note"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "memory_recall".into(),
-            vec!["recall", "remember", "what did", "history", "previous"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "browser_open".into(),
-            vec!["browser", "webpage", "website", "url", "open page"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "web_search".into(),
-            vec!["search", "google", "look up", "find online"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "web_fetch".into(),
-            vec!["fetch", "download", "curl", "http get"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "http_request".into(),
-            vec!["api", "request", "post", "endpoint", "rest"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "glob_search".into(),
-            vec!["find file", "glob", "search files", "locate"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "content_search".into(),
-            vec!["grep", "search content", "find in files", "pattern"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        );
-        map.insert(
-            "gpio_read".into(),
-            vec![
-                "gpio", "pin", "hardware", "sensor", "led", "arduino", "nucleo",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        );
-        map.insert(
-            "gpio_write".into(),
-            vec![
-                "gpio", "pin", "hardware", "led", "blink", "arduino", "nucleo",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        );
-        Self { tool_keywords: map }
+        Self {
+            tool_keywords: default_keyword_map(),
+        }
     }
 }
 
@@ -135,15 +104,12 @@ impl ToolSelector for KeywordToolSelector {
         }
 
         for tool_name in all_tools {
-            if selected.contains(&tool_name.to_string()) {
+            if CORE_TOOLS.contains(tool_name) {
                 continue;
             }
             if let Some(keywords) = self.tool_keywords.get(*tool_name) {
-                let score = keywords
-                    .iter()
-                    .filter(|kw| lower.contains(kw.as_str()))
-                    .count();
-                if score > 0 {
+                let hit = keywords.iter().any(|kw| lower.contains(kw));
+                if hit {
                     selected.push(tool_name.to_string());
                 }
             } else {
