@@ -304,6 +304,35 @@ Use these rules to keep the trait/factory architecture stable under growth.
 - Introduce new shared abstractions only after repeated use (rule-of-three), with at least one real caller in current scope.
 - For config/schema changes, treat keys as public contract: document defaults, compatibility impact, and migration/rollback path.
 
+### 6.5 GitHub Authentication for Claude Code Mobile (Required)
+
+When running in Claude Code mobile/web sessions where `gh` CLI is not pre-authenticated:
+
+1. **Use GitHub Device Flow** — never paste tokens into the chat.
+   ```bash
+   unset GH_TOKEN  # clear any stale env var
+   gh auth login --hostname github.com --git-protocol https --web
+   ```
+2. The command outputs a **one-time code** (e.g., `ABCD-1234`) and a URL.
+3. Open `https://github.com/login/device` in your phone browser.
+4. Enter the code and approve access.
+5. Return to the session — `gh` is now authenticated with no token in chat history.
+
+Important notes:
+
+- If a stale `GH_TOKEN` env var exists, it takes priority over stored credentials. Always `unset GH_TOKEN` first.
+- Device flow tokens are scoped and revocable from GitHub Settings > Applications > Authorized OAuth Apps.
+- Never paste raw tokens into the chat — they persist in conversation history.
+- Never `cat` or read `~/.config/gh/hosts.yml` — it contains the stored OAuth token in plaintext and will leak it into conversation history.
+- After the session, revoke the device flow token from GitHub Settings since the sandbox is ephemeral but chat history is not.
+- Sandbox environments are ephemeral (artifacts destroyed after session), but treat chat history as semi-permanent — always revoke tokens after use.
+
+Fallback workflow (no token at all):
+
+- Agent codes, commits, and pushes to branches.
+- Maintainer creates and merges PRs from GitHub Mobile app or web UI.
+- Issue closing is handled via `Closes #N` keywords in commit messages.
+
 ## 7) Change Playbooks
 
 ### 7.1 Adding a Provider
