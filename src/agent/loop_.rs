@@ -629,6 +629,8 @@ pub(crate) async fn agent_turn(
         None,
         None,
         &[],
+        None,
+        0,
     )
     .await
 }
@@ -675,6 +677,8 @@ pub(crate) async fn run_tool_call_loop_with_reply_target(
                 on_delta,
                 hooks,
                 excluded_tools,
+                None,
+                0,
             ),
         )
         .await
@@ -730,6 +734,8 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
                         on_delta,
                         hooks,
                         excluded_tools,
+                        None,
+                        0,
                     ),
                 ),
             ),
@@ -769,6 +775,8 @@ pub(crate) async fn run_tool_call_loop(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    allowed_tools: Option<&[String]>,
+    max_tool_calls_per_turn: usize,
 ) -> Result<String> {
     let non_cli_approval_context = TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT
         .try_with(Clone::clone)
@@ -792,9 +800,19 @@ pub(crate) async fn run_tool_call_loop(
 
     let tool_specs: Vec<crate::tools::ToolSpec> = tools_registry
         .iter()
+        .filter(|tool| match allowed_tools {
+            Some(allowed) => allowed.iter().any(|a| a == tool.name()),
+            None => true,
+        })
         .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))
         .map(|tool| tool.spec())
         .collect();
+    tracing::debug!(
+        profile_allowed = ?allowed_tools.map(|a| a.len()),
+        filtered_count = tool_specs.len(),
+        registry_count = tools_registry.len(),
+        "Tool specs filtered by profile"
+    );
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
     let turn_id = Uuid::new_v4().to_string();
     let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
@@ -823,6 +841,8 @@ pub(crate) async fn run_tool_call_loop(
             serde_json::json!({}),
         );
     }
+
+    let mut tool_calls_this_turn: usize = 0;
 
     for iteration in 0..max_iterations {
         if cancellation_token
@@ -1564,6 +1584,22 @@ pub(crate) async fn run_tool_call_loop(
             }
         }
 
+        // ── Tool call budget: count calls and inject stop message ──
+        tool_calls_this_turn += tool_calls.len();
+        if max_tool_calls_per_turn > 0 && tool_calls_this_turn >= max_tool_calls_per_turn {
+            tracing::warn!(
+                calls = tool_calls_this_turn,
+                max = max_tool_calls_per_turn,
+                "Injecting tool-call-limit stop message"
+            );
+            let stop_msg = format!(
+                "You have made {} tool calls (limit: {}). \
+                 Stop calling tools and provide your final answer now.",
+                tool_calls_this_turn, max_tool_calls_per_turn
+            );
+            history.push(ChatMessage::user(stop_msg));
+        }
+
         // ── Loop detection: check verdict ────────────────────────
         match loop_detector.check() {
             DetectionVerdict::Continue => {}
@@ -1991,6 +2027,17 @@ pub async fn run(
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
     }
+    // ── Tool profile filtering: restrict tool_descs in system prompt ──
+    let resolved_tool_profile = config.agent.tool_profile.resolve();
+    if let Some(ref allowed) = resolved_tool_profile {
+        tool_descs.retain(|(name, _)| allowed.iter().any(|a| a == name));
+        tracing::debug!(
+            profile = ?config.agent.tool_profile,
+            allowed_count = tool_descs.len(),
+            "Tool descriptions filtered by profile for system prompt"
+        );
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -2092,6 +2139,8 @@ pub async fn run(
                         None,
                         None,
                         &[],
+                        resolved_tool_profile.as_deref(),
+                        config.agent.max_tool_calls_per_turn,
                     ),
                 ),
             )
@@ -2253,6 +2302,8 @@ pub async fn run(
                             None,
                             None,
                             &[],
+                            resolved_tool_profile.as_deref(),
+                            config.agent.max_tool_calls_per_turn,
                         ),
                     ),
                 )
@@ -2941,6 +2992,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -2976,6 +3029,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("anthropic route should not fail on a false-negative vision capability probe");
@@ -3020,6 +3075,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect_err("oversized payload must fail");
@@ -3060,6 +3117,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -3186,6 +3245,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("parallel execution should complete");
@@ -3257,6 +3318,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("tool loop should complete with denied tool execution");
@@ -3313,6 +3376,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("tool loop should consume non-cli session grants");
@@ -3453,6 +3518,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("tool loop should consume one-time allow-all token");
@@ -3508,6 +3575,8 @@ mod tests {
             None,
             None,
             &excluded_tools,
+            None,
+            0,
         )
         .await
         .expect("tool loop should complete with blocked tool execution");
@@ -3572,6 +3641,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -3628,6 +3699,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("native fallback id flow should complete");
@@ -3687,6 +3760,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            0,
         )
         .await
         .expect("loop should recover after one deferred-action reply");

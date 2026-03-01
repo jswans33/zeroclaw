@@ -55,6 +55,10 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     Ok(t)
 }
 
+fn parse_tool_profile(s: &str) -> std::result::Result<crate::config::ToolProfile, String> {
+    s.parse()
+}
+
 mod agent;
 mod approval;
 mod auth;
@@ -234,6 +238,14 @@ Examples:
         /// Memory backend (sqlite, markdown, none)
         #[arg(long)]
         memory_backend: Option<String>,
+
+        /// Tool profile: full, minimal, skill_runner, or comma-separated tool names
+        #[arg(long, value_parser = parse_tool_profile)]
+        tool_profile: Option<crate::config::ToolProfile>,
+
+        /// Maximum tool calls per turn (0 = unlimited)
+        #[arg(long)]
+        max_tool_calls_per_turn: Option<usize>,
     },
 
     /// Start the gateway server (webhooks, websockets)
@@ -882,6 +894,8 @@ async fn main() -> Result<()> {
             max_history_messages,
             compact_context,
             memory_backend,
+            tool_profile,
+            max_tool_calls_per_turn,
         } => {
             if let Some(level) = autonomy_level {
                 config.autonomy.level = level;
@@ -900,6 +914,12 @@ async fn main() -> Result<()> {
             }
             if let Some(ref backend) = memory_backend {
                 config.memory.backend = backend.clone();
+            }
+            if let Some(profile) = tool_profile {
+                config.agent.tool_profile = profile;
+            }
+            if let Some(n) = max_tool_calls_per_turn {
+                config.agent.max_tool_calls_per_turn = n;
             }
             // interactive=true only when no --message flag (real REPL session).
             // Single-shot mode (-m) runs non-interactively: no TTY approval prompt,
