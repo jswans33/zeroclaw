@@ -321,9 +321,11 @@ When running in Claude Code mobile/web sessions where `gh` CLI is not pre-authen
 Important notes:
 
 - If a stale `GH_TOKEN` env var exists, it takes priority over stored credentials. Always `unset GH_TOKEN` first.
-- Device flow tokens are scoped and revocable from GitHub Settings > Developer settings > Personal access tokens.
+- Device flow tokens are scoped and revocable from GitHub Settings > Applications > Authorized OAuth Apps.
 - Never paste raw tokens into the chat — they persist in conversation history.
-- After the session, revoke the device flow token if it was a one-time use.
+- Never `cat` or read `~/.config/gh/hosts.yml` — it contains the stored OAuth token in plaintext and will leak it into conversation history.
+- After the session, revoke the device flow token from GitHub Settings since the sandbox is ephemeral but chat history is not.
+- Sandbox environments are ephemeral (artifacts destroyed after session), but treat chat history as semi-permanent — always revoke tokens after use.
 
 Fallback workflow (no token at all):
 
