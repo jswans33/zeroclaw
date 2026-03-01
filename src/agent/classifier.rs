@@ -92,9 +92,29 @@ pub fn default_tool_classification_rules() -> &'static [ClassificationRule] {
                 ..Default::default()
             },
             ClassificationRule {
+                hint: "moderate".into(),
+                keywords: vec![
+                    "explain".into(),
+                    "compare".into(),
+                    "analyze".into(),
+                    "debug".into(),
+                    "write code".into(),
+                    "how does".into(),
+                    "how to".into(),
+                    "why does".into(),
+                    "architect".into(),
+                    "design".into(),
+                    "optimize".into(),
+                    "refactor".into(),
+                ],
+                min_length: Some(50),
+                priority: 5,
+                ..Default::default()
+            },
+            ClassificationRule {
                 hint: "skill".into(),
                 keywords: vec!["run skill".into()],
-                priority: 5,
+                priority: 8,
                 tool_profile: Some(ToolProfile::Named(ToolProfileName::SkillRunner)),
                 ..Default::default()
             },
@@ -315,10 +335,59 @@ mod tests {
             enabled: true,
             rules: default_tool_classification_rules().to_vec(),
         };
-        assert!(classify_with_decision(
+        // Long complex queries match "moderate" hint but have no tool_profile override
+        let decision = classify_with_decision(
             &config,
-            "refactor the authentication module to use JWT tokens and add comprehensive test coverage"
+            "refactor the authentication module to use JWT tokens and add comprehensive test coverage",
+        );
+        assert!(decision.is_some());
+        let d = decision.unwrap();
+        assert_eq!(d.hint, "moderate");
+        assert_eq!(d.tool_profile, None);
+    }
+
+    #[test]
+    fn moderate_rule_matches_long_explain_query() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: default_tool_classification_rules().to_vec(),
+        };
+        let decision = classify_with_decision(
+            &config,
+            "explain how async/await works in Rust compared to goroutines",
         )
-        .is_none());
+        .expect("should match moderate rule");
+        assert_eq!(decision.hint, "moderate");
+        assert_eq!(decision.tool_profile, None);
+    }
+
+    #[test]
+    fn moderate_rule_rejects_short_queries() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: default_tool_classification_rules().to_vec(),
+        };
+        // "how do I open a file" is 20 chars, below min_length 50
+        assert!(
+            classify_with_decision(&config, "how to open a file").is_none()
+                || classify_with_decision(&config, "how to open a file")
+                    .unwrap()
+                    .hint
+                    != "moderate"
+        );
+    }
+
+    #[test]
+    fn skill_rule_beats_moderate_on_priority() {
+        let config = QueryClassificationConfig {
+            enabled: true,
+            rules: default_tool_classification_rules().to_vec(),
+        };
+        let decision = classify_with_decision(
+            &config,
+            "run skill to explain something in detail for me please",
+        )
+        .expect("should match skill rule");
+        assert_eq!(decision.hint, "skill");
     }
 }
