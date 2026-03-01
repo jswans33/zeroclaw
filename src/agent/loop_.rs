@@ -88,11 +88,26 @@ fn classify_turn_tool_profile(
     classification_config: &QueryClassificationConfig,
     static_profile: &ToolProfile,
     message: &str,
+    dynamic_filtering: bool,
+    tools_registry: &[Box<dyn Tool>],
 ) -> Option<Vec<String>> {
     let classification_tool_profile =
         super::classifier::classify_with_decision(classification_config, message)
             .and_then(|d| d.tool_profile);
-    resolve_effective_tool_profile(static_profile, classification_tool_profile.as_ref()).resolve()
+    if let Some(ref _override) = classification_tool_profile {
+        return resolve_effective_tool_profile(static_profile, classification_tool_profile.as_ref())
+            .resolve();
+    }
+    if dynamic_filtering {
+        use super::tool_selector::ToolSelector;
+        let selector = super::tool_selector::KeywordToolSelector::default();
+        let tool_names: Vec<&str> = tools_registry.iter().map(|t| t.name()).collect();
+        let selected = selector.select_tools(message, &tool_names, static_profile);
+        if selected.len() < tool_names.len() {
+            return Some(selected);
+        }
+    }
+    resolve_effective_tool_profile(static_profile, None).resolve()
 }
 
 fn should_treat_provider_as_vision_capable(provider_name: &str, provider: &dyn Provider) -> bool {
@@ -2162,6 +2177,8 @@ pub async fn run(
             &config.query_classification,
             &config.agent.tool_profile,
             &msg,
+            config.agent.dynamic_tool_filtering,
+            &tools_registry,
         );
 
         let ld_cfg = LoopDetectionConfig {
@@ -2331,6 +2348,8 @@ pub async fn run(
                 &config.query_classification,
                 &config.agent.tool_profile,
                 &user_input,
+                config.agent.dynamic_tool_filtering,
+                &tools_registry,
             );
 
             let ld_cfg = LoopDetectionConfig {
@@ -2637,6 +2656,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.query_classification,
         &config.agent.tool_profile,
         message,
+        config.agent.dynamic_tool_filtering,
+        &tools_registry,
     );
 
     let mut history = vec![
