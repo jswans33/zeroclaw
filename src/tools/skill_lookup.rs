@@ -180,6 +180,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skill_lookup_returns_error_for_empty_skill_name() {
+        let tool = SkillLookupTool::new(vec![test_skill()]);
+        let result = tool.execute(json!({"skill_name": ""})).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.output.is_empty());
+        let err = result.error.unwrap();
+        assert!(err.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn skill_lookup_returns_error_for_missing_skill_name_param() {
+        let tool = SkillLookupTool::new(vec![test_skill()]);
+        let result = tool.execute(json!({})).await.unwrap();
+
+        assert!(!result.success);
+        assert!(result.output.is_empty());
+        let err = result.error.unwrap();
+        assert!(err.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn skill_lookup_with_empty_skills_list_reports_no_skills_loaded() {
+        let tool = SkillLookupTool::new(vec![]);
+        let result = tool
+            .execute(json!({"skill_name": "anything"}))
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("not found"));
+        assert!(err.contains("No skills are loaded"));
+    }
+
+    #[tokio::test]
     async fn skill_lookup_lists_available_skills_on_miss() {
         let mut skill2 = test_skill();
         skill2.name = "code_review".into();

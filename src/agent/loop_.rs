@@ -1,5 +1,7 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
-use crate::config::{Config, SkillsPromptInjectionMode, ToolProfile, ToolProfileName};
+use crate::config::{
+    Config, QueryClassificationConfig, SkillsPromptInjectionMode, ToolProfile, ToolProfileName,
+};
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::multimodal;
 use crate::observability::{self, runtime_trace, Observer, ObserverEvent};
@@ -71,6 +73,26 @@ fn resolve_effective_skills_mode(
         }
         _ => config_mode,
     }
+}
+
+fn resolve_effective_tool_profile(
+    static_profile: &ToolProfile,
+    classification_override: Option<&ToolProfile>,
+) -> ToolProfile {
+    classification_override
+        .cloned()
+        .unwrap_or_else(|| static_profile.clone())
+}
+
+fn classify_turn_tool_profile(
+    classification_config: &QueryClassificationConfig,
+    static_profile: &ToolProfile,
+    message: &str,
+) -> Option<Vec<String>> {
+    let classification_tool_profile =
+        super::classifier::classify_with_decision(classification_config, message)
+            .and_then(|d| d.tool_profile);
+    resolve_effective_tool_profile(static_profile, classification_tool_profile.as_ref()).resolve()
 }
 
 fn should_treat_provider_as_vision_capable(provider_name: &str, provider: &dyn Provider) -> bool {
@@ -1792,15 +1814,6 @@ pub(crate) fn build_shell_policy_instructions(autonomy: &crate::config::Autonomy
     instructions
 }
 
-fn resolve_effective_tool_profile(
-    static_profile: &ToolProfile,
-    classification_override: Option<&ToolProfile>,
-) -> ToolProfile {
-    classification_override
-        .cloned()
-        .unwrap_or_else(|| static_profile.clone())
-}
-
 // ── CLI Entrypoint ───────────────────────────────────────────────────────
 // Wires up all subsystems (observer, runtime, security, memory, tools,
 // provider, hardware RAG, peripherals) and enters either single-shot or
@@ -2143,16 +2156,11 @@ pub async fn run(
             ChatMessage::user(&enriched),
         ];
 
-        // Classify message for dynamic tool profile override
-        let classification_decision =
-            super::classifier::classify_with_decision(&config.query_classification, &msg);
-        let classification_tool_profile =
-            classification_decision.and_then(|d| d.tool_profile);
-        let effective_profile = resolve_effective_tool_profile(
+        let turn_tool_profile = classify_turn_tool_profile(
+            &config.query_classification,
             &config.agent.tool_profile,
-            classification_tool_profile.as_ref(),
+            &msg,
         );
-        let turn_tool_profile = effective_profile.resolve();
 
         let ld_cfg = LoopDetectionConfig {
             no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
@@ -2317,18 +2325,11 @@ pub async fn run(
                 history.push(ChatMessage::user(reminder));
             }
 
-            // Classify message for dynamic tool profile override
-            let classification_decision = super::classifier::classify_with_decision(
+            let turn_tool_profile = classify_turn_tool_profile(
                 &config.query_classification,
+                &config.agent.tool_profile,
                 &user_input,
             );
-            let classification_tool_profile =
-                classification_decision.and_then(|d| d.tool_profile);
-            let effective_profile = resolve_effective_tool_profile(
-                &config.agent.tool_profile,
-                classification_tool_profile.as_ref(),
-            );
-            let turn_tool_profile = effective_profile.resolve();
 
             let ld_cfg = LoopDetectionConfig {
                 no_progress_threshold: config.agent.loop_detection_no_progress_threshold,

@@ -3771,6 +3771,7 @@ pub struct ClassificationRule {
     /// Higher priority rules are checked first.
     #[serde(default)]
     pub priority: i32,
+    /// Override the active tool profile when this rule matches.
     #[serde(default)]
     pub tool_profile: Option<ToolProfile>,
 }
