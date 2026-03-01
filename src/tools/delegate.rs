@@ -508,6 +508,8 @@ impl DelegateTool {
                 None,
                 None,
                 &[],
+                None,
+                0,
             ),
         )
         .await;

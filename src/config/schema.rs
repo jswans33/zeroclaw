@@ -714,6 +714,90 @@ impl Default for CoordinationConfig {
     }
 }
 
+/// Named tool profile presets.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProfileName {
+    /// All tools enabled (current behavior, backward compatible).
+    #[default]
+    Full,
+    /// Core tools: shell, file_read, file_write, file_edit, memory_store,
+    /// memory_recall, glob_search, content_search.
+    Minimal,
+    /// Bare minimum for skill execution: shell, file_read, file_write.
+    SkillRunner,
+}
+
+/// Tool profile controlling which tools the model can see.
+/// Named presets (`"full"`, `"minimal"`, `"skill_runner"`) or a custom list of tool names.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ToolProfile {
+    Named(ToolProfileName),
+    Custom(Vec<String>),
+}
+
+impl Default for ToolProfile {
+    fn default() -> Self {
+        Self::Named(ToolProfileName::Full)
+    }
+}
+
+impl ToolProfile {
+    /// Resolve the profile to an allowlist of tool names.
+    /// Returns `None` for `Full` (no filtering), `Some(list)` for everything else.
+    pub fn resolve(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Named(ToolProfileName::Full) => None,
+            Self::Named(ToolProfileName::Minimal) => Some(
+                [
+                    "shell",
+                    "file_read",
+                    "file_write",
+                    "file_edit",
+                    "memory_store",
+                    "memory_recall",
+                    "glob_search",
+                    "content_search",
+                ]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            ),
+            Self::Named(ToolProfileName::SkillRunner) => Some(
+                ["shell", "file_read", "file_write"]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            ),
+            Self::Custom(list) => Some(list.clone()),
+        }
+    }
+}
+
+impl std::str::FromStr for ToolProfile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "full" => Ok(Self::Named(ToolProfileName::Full)),
+            "minimal" => Ok(Self::Named(ToolProfileName::Minimal)),
+            "skill_runner" | "skill-runner" => Ok(Self::Named(ToolProfileName::SkillRunner)),
+            other => {
+                if other.contains(',') {
+                    Ok(Self::Custom(
+                        other.split(',').map(|s| s.trim().to_string()).collect(),
+                    ))
+                } else {
+                    Err(format!(
+                        "unknown tool profile '{other}'; expected full, minimal, skill_runner, or comma-separated tool names"
+                    ))
+                }
+            }
+        }
+    }
+}
+
 /// Agent orchestration configuration (`[agent]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
@@ -762,6 +846,17 @@ pub struct AgentConfig {
     /// set to `0` for explicit disable.
     #[serde(default = "default_safety_heartbeat_turn_interval")]
     pub safety_heartbeat_turn_interval: usize,
+    /// Named tool profile that limits which tools the model can see.
+    /// `"full"` (default) = all tools. `"minimal"` = core tools only.
+    /// `"skill_runner"` = shell + file_read + file_write (just enough to execute skills).
+    /// Custom profiles list tool names explicitly: `["shell", "file_read"]`.
+    #[serde(default)]
+    pub tool_profile: ToolProfile,
+    /// Maximum tool calls the model can make per single user message.
+    /// After this many calls, the agent injects a stop message asking the model
+    /// to provide its final answer. Set to `0` for unlimited (default).
+    #[serde(default)]
+    pub max_tool_calls_per_turn: usize,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -809,6 +904,8 @@ impl Default for AgentConfig {
             loop_detection_failure_streak: default_loop_detection_failure_streak(),
             safety_heartbeat_interval: default_safety_heartbeat_interval(),
             safety_heartbeat_turn_interval: default_safety_heartbeat_turn_interval(),
+            tool_profile: ToolProfile::default(),
+            max_tool_calls_per_turn: 0,
         }
     }
 }
@@ -8936,6 +9033,8 @@ reasoning_level = "high"
         assert_eq!(cfg.max_history_messages, 50);
         assert!(!cfg.parallel_tools);
         assert_eq!(cfg.tool_dispatcher, "auto");
+        assert_eq!(cfg.tool_profile, ToolProfile::Named(ToolProfileName::Full));
+        assert_eq!(cfg.max_tool_calls_per_turn, 0);
     }
 
     #[test]
@@ -8955,6 +9054,82 @@ tool_dispatcher = "xml"
         assert_eq!(parsed.agent.max_history_messages, 80);
         assert!(parsed.agent.parallel_tools);
         assert_eq!(parsed.agent.tool_dispatcher, "xml");
+        assert_eq!(
+            parsed.agent.tool_profile,
+            ToolProfile::Named(ToolProfileName::Full)
+        );
+        assert_eq!(parsed.agent.max_tool_calls_per_turn, 0);
+    }
+
+    #[test]
+    async fn tool_profile_skill_runner_resolves() {
+        let profile = ToolProfile::Named(ToolProfileName::SkillRunner);
+        let resolved = profile.resolve().unwrap();
+        assert_eq!(resolved, vec!["shell", "file_read", "file_write"]);
+    }
+
+    #[test]
+    async fn tool_profile_full_no_filter() {
+        let profile = ToolProfile::Named(ToolProfileName::Full);
+        assert!(profile.resolve().is_none());
+    }
+
+    #[test]
+    async fn tool_profile_custom_list() {
+        let profile = ToolProfile::Custom(vec!["shell".into(), "memory_recall".into()]);
+        let resolved = profile.resolve().unwrap();
+        assert_eq!(resolved, vec!["shell", "memory_recall"]);
+    }
+
+    #[test]
+    async fn tool_profile_from_str() {
+        assert_eq!(
+            "full".parse::<ToolProfile>().unwrap(),
+            ToolProfile::Named(ToolProfileName::Full)
+        );
+        assert_eq!(
+            "skill_runner".parse::<ToolProfile>().unwrap(),
+            ToolProfile::Named(ToolProfileName::SkillRunner)
+        );
+        assert_eq!(
+            "skill-runner".parse::<ToolProfile>().unwrap(),
+            ToolProfile::Named(ToolProfileName::SkillRunner)
+        );
+        assert_eq!(
+            "shell,file_read".parse::<ToolProfile>().unwrap(),
+            ToolProfile::Custom(vec!["shell".into(), "file_read".into()])
+        );
+        assert!("unknown_single".parse::<ToolProfile>().is_err());
+    }
+
+    #[test]
+    async fn tool_profile_deserializes_from_toml() {
+        let raw = r#"
+default_temperature = 0.7
+[agent]
+tool_profile = "skill_runner"
+max_tool_calls_per_turn = 3
+"#;
+        let parsed: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.agent.tool_profile,
+            ToolProfile::Named(ToolProfileName::SkillRunner)
+        );
+        assert_eq!(parsed.agent.max_tool_calls_per_turn, 3);
+    }
+
+    #[test]
+    async fn tool_profile_custom_deserializes_from_toml() {
+        let raw = r#"
+default_temperature = 0.7
+[agent]
+tool_profile = ["shell", "memory_recall"]
+"#;
+        let parsed: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.agent.tool_profile,
+            ToolProfile::Custom(vec!["shell".into(), "memory_recall".into()])
+        );
     }
 
     #[tokio::test]
