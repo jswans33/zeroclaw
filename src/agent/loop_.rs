@@ -91,12 +91,41 @@ fn classify_turn_tool_profile(
     dynamic_filtering: bool,
     tools_registry: &[Box<dyn Tool>],
 ) -> Option<Vec<String>> {
+    let total_tools = tools_registry.len();
+
+    // When dynamic filtering is on, ensure we have classification rules.
+    // If the user didn't configure any, inject the built-in defaults.
+    let effective_config: QueryClassificationConfig;
+    let config_ref = if dynamic_filtering
+        && (!classification_config.enabled || classification_config.rules.is_empty())
+    {
+        effective_config = QueryClassificationConfig {
+            enabled: true,
+            rules: if classification_config.rules.is_empty() {
+                super::classifier::default_tool_classification_rules()
+            } else {
+                classification_config.rules.clone()
+            },
+        };
+        &effective_config
+    } else {
+        classification_config
+    };
+
     let classification_tool_profile =
-        super::classifier::classify_with_decision(classification_config, message)
+        super::classifier::classify_with_decision(config_ref, message)
             .and_then(|d| d.tool_profile);
-    if let Some(ref _override) = classification_tool_profile {
-        return resolve_effective_tool_profile(static_profile, classification_tool_profile.as_ref())
+    if let Some(ref override_profile) = classification_tool_profile {
+        let result = resolve_effective_tool_profile(static_profile, classification_tool_profile.as_ref())
             .resolve();
+        tracing::info!(
+            source = "classification_rule",
+            override_profile = ?override_profile,
+            allowed = ?result.as_ref().map(|v| v.len()),
+            total = total_tools,
+            "Dynamic tool filtering applied"
+        );
+        return result;
     }
     if dynamic_filtering {
         use super::tool_selector::ToolSelector;
@@ -104,9 +133,22 @@ fn classify_turn_tool_profile(
         let tool_names: Vec<&str> = tools_registry.iter().map(|t| t.name()).collect();
         let selected = selector.select_tools(message, &tool_names, static_profile);
         if selected.len() < tool_names.len() {
+            tracing::info!(
+                source = "keyword_selector",
+                allowed = selected.len(),
+                total = total_tools,
+                tools = ?selected,
+                "Dynamic tool filtering applied"
+            );
             return Some(selected);
         }
     }
+    tracing::debug!(
+        source = "static_profile",
+        profile = ?static_profile,
+        total = total_tools,
+        "No dynamic filtering — using static profile"
+    );
     resolve_effective_tool_profile(static_profile, None).resolve()
 }
 
