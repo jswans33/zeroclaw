@@ -2086,7 +2086,9 @@ pub async fn run(
         &config.agent.tool_profile,
         config.skills.prompt_injection_mode,
     );
-    if effective_skills_mode == SkillsPromptInjectionMode::Compact && !skills.is_empty() {
+    // Always register SkillLookupTool when skills exist — per-turn classification
+    // may switch to Minimal/SkillRunner even when static profile is Full.
+    if !skills.is_empty() {
         tools_registry.push(Box::new(tools::SkillLookupTool::new(skills.clone())));
     }
 
@@ -2589,7 +2591,9 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.agent.tool_profile,
         config.skills.prompt_injection_mode,
     );
-    if effective_skills_mode == SkillsPromptInjectionMode::Compact && !skills.is_empty() {
+    // Always register SkillLookupTool when skills exist — per-turn classification
+    // may switch to Minimal/SkillRunner even when static profile is Full.
+    if !skills.is_empty() {
         tools_registry.push(Box::new(tools::SkillLookupTool::new(skills.clone())));
     }
 
@@ -2628,6 +2632,13 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         format!("{context}[{now}] {message}")
     };
 
+    // Per-turn classification for channel messages (same as run() paths).
+    let turn_tool_profile = classify_turn_tool_profile(
+        &config.query_classification,
+        &config.agent.tool_profile,
+        message,
+    );
+
     let mut history = vec![
         ChatMessage::system(&system_prompt),
         ChatMessage::user(&enriched),
@@ -2644,7 +2655,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     SAFETY_HEARTBEAT_CONFIG
         .scope(
             hb_cfg,
-            agent_turn(
+            run_tool_call_loop(
                 provider.as_ref(),
                 &mut history,
                 &tools_registry,
@@ -2653,8 +2664,16 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
                 &model_name,
                 config.default_temperature,
                 true,
+                None,
+                "channel",
                 &config.multimodal,
                 config.agent.max_tool_iterations,
+                None,
+                None,
+                None,
+                &[],
+                turn_tool_profile.as_deref(),
+                0,
             ),
         )
         .await
