@@ -367,14 +367,10 @@ mod tests {
             enabled: true,
             rules: default_tool_classification_rules().to_vec(),
         };
-        // "how do I open a file" is 20 chars, below min_length 50
-        assert!(
-            classify_with_decision(&config, "how to open a file").is_none()
-                || classify_with_decision(&config, "how to open a file")
-                    .unwrap()
-                    .hint
-                    != "moderate"
-        );
+        // "how to open a file" is 18 chars, below min_length 50
+        let decision = classify_with_decision(&config, "how to open a file");
+        let is_moderate = decision.as_ref().map(|d| d.hint.as_str()) == Some("moderate");
+        assert!(!is_moderate, "Short query should not match 'moderate' rule");
     }
 
     #[test]

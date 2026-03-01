@@ -80,6 +80,20 @@ struct TurnClassification {
     model_hint: Option<String>,
 }
 
+impl TurnClassification {
+    fn log_cascade_routing(&self, default_model: &str) {
+        if let Some(ref hint) = self.model_hint {
+            tracing::info!(
+                source = "cascade_routing",
+                hint = hint,
+                effective_model = hint.as_str(),
+                default_model = default_model,
+                "Model escalation applied"
+            );
+        }
+    }
+}
+
 fn classify_turn(
     classification_config: &QueryClassificationConfig,
     static_profile: &ToolProfile,
@@ -2243,16 +2257,8 @@ pub async fn run(
             &tools_registry,
             &available_hints,
         );
+        classification.log_cascade_routing(model_name);
         let effective_model = classification.model_hint.as_deref().unwrap_or(model_name);
-        if classification.model_hint.is_some() {
-            tracing::info!(
-                source = "cascade_routing",
-                hint = ?classification.model_hint,
-                effective_model = effective_model,
-                default_model = model_name,
-                "Model escalation applied"
-            );
-        }
 
         let ld_cfg = LoopDetectionConfig {
             no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
@@ -2425,16 +2431,8 @@ pub async fn run(
                 &tools_registry,
                 &available_hints,
             );
+            classification.log_cascade_routing(model_name);
             let effective_model = classification.model_hint.as_deref().unwrap_or(model_name);
-            if classification.model_hint.is_some() {
-                tracing::info!(
-                    source = "cascade_routing",
-                    hint = ?classification.model_hint,
-                    effective_model = effective_model,
-                    default_model = model_name,
-                    "Model escalation applied"
-                );
-            }
 
             let ld_cfg = LoopDetectionConfig {
                 no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
@@ -2751,19 +2749,11 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &tools_registry,
         &available_hints,
     );
+    classification.log_cascade_routing(&model_name);
     let effective_model = classification
         .model_hint
         .as_deref()
         .unwrap_or(&model_name);
-    if classification.model_hint.is_some() {
-        tracing::info!(
-            source = "cascade_routing",
-            hint = ?classification.model_hint,
-            effective_model = effective_model,
-            default_model = &*model_name,
-            "Model escalation applied"
-        );
-    }
 
     let mut history = vec![
         ChatMessage::system(&system_prompt),
