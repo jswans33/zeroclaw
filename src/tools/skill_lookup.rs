@@ -119,6 +119,7 @@ impl Tool for SkillLookupTool {
 mod tests {
     use super::*;
     use crate::skills::SkillTool;
+    use std::collections::HashMap;
 
     fn test_skill() -> Skill {
         Skill {
@@ -132,7 +133,7 @@ mod tests {
                 description: "Fetch weather data".into(),
                 kind: "http".into(),
                 command: "https://api.example.com/weather".into(),
-                args: Default::default(),
+                args: HashMap::default(),
             }],
             prompts: vec![
                 "Use the get_weather tool to fetch weather data.".into(),

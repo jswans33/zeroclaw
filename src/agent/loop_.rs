@@ -1,5 +1,5 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
-use crate::config::Config;
+use crate::config::{Config, SkillsPromptInjectionMode, ToolProfile, ToolProfileName};
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::multimodal;
 use crate::observability::{self, runtime_trace, Observer, ObserverEvent};
@@ -60,6 +60,18 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 20;
 /// Minimum user-message length (in chars) for auto-save to memory.
 /// Matches the channel-side constant in `channels/mod.rs`.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
+
+fn resolve_effective_skills_mode(
+    profile: &ToolProfile,
+    config_mode: SkillsPromptInjectionMode,
+) -> SkillsPromptInjectionMode {
+    match profile {
+        ToolProfile::Named(ToolProfileName::SkillRunner | ToolProfileName::Minimal) => {
+            SkillsPromptInjectionMode::Compact
+        }
+        _ => config_mode,
+    }
+}
 
 fn should_treat_provider_as_vision_capable(provider_name: &str, provider: &dyn Provider) -> bool {
     if provider.supports_vision() {
@@ -1780,6 +1792,15 @@ pub(crate) fn build_shell_policy_instructions(autonomy: &crate::config::Autonomy
     instructions
 }
 
+fn resolve_effective_tool_profile(
+    static_profile: &ToolProfile,
+    classification_override: Option<&ToolProfile>,
+) -> ToolProfile {
+    classification_override
+        .cloned()
+        .unwrap_or_else(|| static_profile.clone())
+}
+
 // ── CLI Entrypoint ───────────────────────────────────────────────────────
 // Wires up all subsystems (observer, runtime, security, memory, tools,
 // provider, hardware RAG, peripherals) and enters either single-shot or
@@ -2047,6 +2068,15 @@ pub async fn run(
         );
     }
 
+    // ── Resolve effective skills prompt mode ──
+    let effective_skills_mode = resolve_effective_skills_mode(
+        &config.agent.tool_profile,
+        config.skills.prompt_injection_mode,
+    );
+    if effective_skills_mode == SkillsPromptInjectionMode::Compact && !skills.is_empty() {
+        tools_registry.push(Box::new(tools::SkillLookupTool::new(skills.clone())));
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -2061,7 +2091,7 @@ pub async fn run(
         Some(&config.identity),
         bootstrap_max_chars,
         native_tools,
-        config.skills.prompt_injection_mode,
+        effective_skills_mode,
     );
 
     // Append structured tool-use instructions with schemas (only for non-native providers)
@@ -2113,6 +2143,17 @@ pub async fn run(
             ChatMessage::user(&enriched),
         ];
 
+        // Classify message for dynamic tool profile override
+        let classification_decision =
+            super::classifier::classify_with_decision(&config.query_classification, &msg);
+        let classification_tool_profile =
+            classification_decision.and_then(|d| d.tool_profile);
+        let effective_profile = resolve_effective_tool_profile(
+            &config.agent.tool_profile,
+            classification_tool_profile.as_ref(),
+        );
+        let turn_tool_profile = effective_profile.resolve();
+
         let ld_cfg = LoopDetectionConfig {
             no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
             ping_pong_cycles: config.agent.loop_detection_ping_pong_cycles,
@@ -2148,7 +2189,7 @@ pub async fn run(
                         None,
                         None,
                         &[],
-                        resolved_tool_profile.as_deref(),
+                        turn_tool_profile.as_deref(),
                         config.agent.max_tool_calls_per_turn,
                     ),
                 ),
@@ -2276,6 +2317,19 @@ pub async fn run(
                 history.push(ChatMessage::user(reminder));
             }
 
+            // Classify message for dynamic tool profile override
+            let classification_decision = super::classifier::classify_with_decision(
+                &config.query_classification,
+                &user_input,
+            );
+            let classification_tool_profile =
+                classification_decision.and_then(|d| d.tool_profile);
+            let effective_profile = resolve_effective_tool_profile(
+                &config.agent.tool_profile,
+                classification_tool_profile.as_ref(),
+            );
+            let turn_tool_profile = effective_profile.resolve();
+
             let ld_cfg = LoopDetectionConfig {
                 no_progress_threshold: config.agent.loop_detection_no_progress_threshold,
                 ping_pong_cycles: config.agent.loop_detection_ping_pong_cycles,
@@ -2311,7 +2365,7 @@ pub async fn run(
                             None,
                             None,
                             &[],
-                            resolved_tool_profile.as_deref(),
+                            turn_tool_profile.as_deref(),
                             config.agent.max_tool_calls_per_turn,
                         ),
                     ),
@@ -2529,6 +2583,15 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
             "Query connected hardware for reported GPIO pins and LED pin. Use when user asks what pins are available.",
         ));
     }
+    // ── Resolve effective skills prompt mode ──
+    let effective_skills_mode = resolve_effective_skills_mode(
+        &config.agent.tool_profile,
+        config.skills.prompt_injection_mode,
+    );
+    if effective_skills_mode == SkillsPromptInjectionMode::Compact && !skills.is_empty() {
+        tools_registry.push(Box::new(tools::SkillLookupTool::new(skills.clone())));
+    }
+
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
     } else {
@@ -2543,7 +2606,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         Some(&config.identity),
         bootstrap_max_chars,
         native_tools,
-        config.skills.prompt_injection_mode,
+        effective_skills_mode,
     );
     if !native_tools {
         system_prompt.push_str(&build_tool_instructions(&tools_registry));
@@ -5537,5 +5600,72 @@ Let me check the result."#;
         let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["content"].as_str(), Some("answer"));
         assert!(parsed.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn skill_runner_profile_forces_compact_skills_mode() {
+        let profile = ToolProfile::Named(ToolProfileName::SkillRunner);
+        let config_mode = SkillsPromptInjectionMode::Full;
+        let effective = resolve_effective_skills_mode(&profile, config_mode);
+        assert_eq!(effective, SkillsPromptInjectionMode::Compact);
+    }
+
+    #[test]
+    fn full_profile_preserves_configured_skills_mode() {
+        let profile = ToolProfile::Named(ToolProfileName::Full);
+        let config_mode = SkillsPromptInjectionMode::Full;
+        let effective = resolve_effective_skills_mode(&profile, config_mode);
+        assert_eq!(effective, SkillsPromptInjectionMode::Full);
+    }
+
+    #[test]
+    fn minimal_profile_forces_compact_skills_mode() {
+        let profile = ToolProfile::Named(ToolProfileName::Minimal);
+        let config_mode = SkillsPromptInjectionMode::Full;
+        let effective = resolve_effective_skills_mode(&profile, config_mode);
+        assert_eq!(effective, SkillsPromptInjectionMode::Compact);
+    }
+
+    #[test]
+    fn custom_profile_preserves_configured_skills_mode() {
+        let profile = ToolProfile::Custom(vec!["shell".into(), "file_read".into()]);
+        let config_mode = SkillsPromptInjectionMode::Full;
+        let effective = resolve_effective_skills_mode(&profile, config_mode);
+        assert_eq!(effective, SkillsPromptInjectionMode::Full);
+    }
+
+    #[test]
+    fn full_profile_preserves_compact_config() {
+        let profile = ToolProfile::Named(ToolProfileName::Full);
+        let config_mode = SkillsPromptInjectionMode::Compact;
+        let effective = resolve_effective_skills_mode(&profile, config_mode);
+        assert_eq!(effective, SkillsPromptInjectionMode::Compact);
+    }
+
+    #[test]
+    fn resolve_effective_tool_profile_uses_classification_override() {
+        let static_profile = ToolProfile::Named(ToolProfileName::Full);
+        let classification_override = Some(ToolProfile::Named(ToolProfileName::Minimal));
+        let effective =
+            resolve_effective_tool_profile(&static_profile, classification_override.as_ref());
+        assert_eq!(effective, ToolProfile::Named(ToolProfileName::Minimal));
+    }
+
+    #[test]
+    fn resolve_effective_tool_profile_falls_back_to_static_when_no_override() {
+        let static_profile = ToolProfile::Named(ToolProfileName::Minimal);
+        let effective = resolve_effective_tool_profile(&static_profile, None);
+        assert_eq!(effective, ToolProfile::Named(ToolProfileName::Minimal));
+    }
+
+    #[test]
+    fn resolve_effective_tool_profile_custom_override_beats_named_static() {
+        let static_profile = ToolProfile::Named(ToolProfileName::Full);
+        let custom = Some(ToolProfile::Custom(vec!["shell".into(), "file_read".into()]));
+        let effective = resolve_effective_tool_profile(&static_profile, custom.as_ref());
+        assert_eq!(
+            effective,
+            ToolProfile::Custom(vec!["shell".into(), "file_read".into()])
+        );
     }
 }
