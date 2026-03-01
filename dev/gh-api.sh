@@ -74,19 +74,39 @@
 #   ./dev/gh-api.sh raw GET /repos/OWNER/REPO/X  # raw GET
 #   ./dev/gh-api.sh raw POST /path '{"json":1}'  # raw POST
 #
+# AUTHENTICATION
+# ~~~~~~~~~~~~~~
+# Write operations require a GitHub token. The script auto-detects from:
+#   1. GH_TOKEN env var (highest priority)
+#   2. .env file in repo root (GH_TOKEN=ghp_...)
+#   3. ~/.config/gh/hosts.yml (gh CLI auth store)
+#
+# To set up:
+#   ./dev/gh-api.sh auth <your-github-token>
+#
+# This saves the token to .env (gitignored) and injects it into the
+# current Claude Code session via CLAUDE_ENV_FILE.
+#
+# To create a token: github.com/settings/tokens?type=beta
+#   Scopes needed: Issues (read/write), Pull requests (read/write),
+#   Contents (read), Actions (read)
+#
 # ENVIRONMENT
 # ~~~~~~~~~~~
-#   GH_TOKEN          — GitHub token for write operations (optional)
+#   GH_TOKEN          — GitHub token (auto-detected, see above)
 #   GH_API_PROXY      — override auto-detected proxy URL
 #   REPO_OWNER        — override auto-detected owner
 #   REPO_NAME         — override auto-detected repo name
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # ─── Detect proxy from git remote ────────────────────────────────────────────
 detect_proxy() {
   local remote_url
-  remote_url="$(git remote get-url origin 2>/dev/null || true)"
+  remote_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
   if [[ -z "$remote_url" ]]; then
     echo "ERROR: no git remote 'origin' found" >&2; return 1
   fi
@@ -100,10 +120,44 @@ detect_proxy() {
 
 # ─── Detect owner/repo from git remote ───────────────────────────────────────
 detect_owner_repo() {
-  git remote get-url origin 2>/dev/null \
+  git -C "$REPO_ROOT" remote get-url origin 2>/dev/null \
     | sed -n 's|.*/git/\([^/]*/[^/]*\)$|\1|p' \
     | sed 's/\.git$//'
 }
+
+# ─── Auto-detect GH_TOKEN ────────────────────────────────────────────────────
+detect_gh_token() {
+  # 1. Already set in environment
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  # 2. Read from .env in repo root
+  if [[ -f "$REPO_ROOT/.env" ]]; then
+    local token
+    token=$(grep -E '^GH_TOKEN=' "$REPO_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "'\"" | xargs)
+    if [[ -n "$token" && "$token" != "your-github-token-here" ]]; then
+      export GH_TOKEN="$token"
+      return 0
+    fi
+  fi
+
+  # 3. Read from gh CLI config
+  local gh_hosts="${HOME}/.config/gh/hosts.yml"
+  if [[ -f "$gh_hosts" ]]; then
+    local token
+    token=$(grep -A5 'github.com' "$gh_hosts" 2>/dev/null | grep 'oauth_token:' | head -1 | awk '{print $2}' | tr -d "'\"")
+    if [[ -n "$token" ]]; then
+      export GH_TOKEN="$token"
+      return 0
+    fi
+  fi
+
+  # No token found — read-only mode
+  return 1
+}
+
+detect_gh_token || true
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
 PROXY="${GH_API_PROXY:-$(detect_proxy)}"
@@ -715,6 +769,124 @@ for i in data.get('items', []):
     esac
     ;;
 
+  # ── Auth setup ──────────────────────────────────────────────────────────────
+  auth)
+    subcmd="${1:-status}"
+    shift || true
+
+    case "$subcmd" in
+      status)
+        echo "─── GitHub Auth Status ───"
+        if [[ -n "${GH_TOKEN:-}" ]]; then
+          masked="${GH_TOKEN:0:8}...${GH_TOKEN: -4}"
+          echo "  Token:  $masked"
+          resp=$(api_get "${API}/rate_limit" 2>/dev/null || echo '{}')
+          limit=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('resources',{}).get('core',{}).get('limit',0))" 2>/dev/null || echo 0)
+          if [[ "$limit" -gt 60 ]]; then
+            echo "  Status: authenticated ($limit req/hr)"
+            user_resp=$(api_get "${API}/user" 2>/dev/null || echo '{}')
+            login=$(echo "$user_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('login','unknown'))" 2>/dev/null || echo "unknown")
+            echo "  User:   $login"
+          else
+            echo "  Status: token present but not authenticating (possibly expired)"
+          fi
+          echo ""
+          echo "  Source:"
+          if [[ -f "$REPO_ROOT/.env" ]] && grep -qE '^GH_TOKEN=' "$REPO_ROOT/.env" 2>/dev/null; then
+            echo "    .env file (persistent across sessions)"
+          fi
+          if [[ -f "${HOME}/.config/gh/hosts.yml" ]]; then
+            echo "    gh CLI config"
+          fi
+          echo "    environment variable"
+        else
+          echo "  Token:  not set (read-only mode)"
+          echo ""
+          echo "  To authenticate, run:"
+          echo "    ./dev/gh-api.sh auth set <your-github-token>"
+          echo ""
+          echo "  To create a token:"
+          echo "    1. Go to github.com/settings/tokens?type=beta"
+          echo "    2. Create a fine-grained token for repo: ${OWNER_REPO}"
+          echo "    3. Scopes: Issues (rw), Pull requests (rw), Contents (r)"
+        fi
+        ;;
+
+      set)
+        token="${1:?Usage: gh-api.sh auth set <github-token>}"
+
+        # Validate token format
+        if [[ ! "$token" =~ ^(ghp_|github_pat_|gho_|ghs_) ]]; then
+          echo "WARNING: token doesn't match known GitHub token prefixes." >&2
+          echo "         Expected: ghp_..., github_pat_..., gho_..., or ghs_..." >&2
+          echo "         Proceeding anyway." >&2
+          echo ""
+        fi
+
+        # 1. Save to .env (persistent, gitignored)
+        if [[ -f "$REPO_ROOT/.env" ]]; then
+          if grep -qE '^GH_TOKEN=' "$REPO_ROOT/.env"; then
+            sed -i "s|^GH_TOKEN=.*|GH_TOKEN=${token}|" "$REPO_ROOT/.env"
+            echo "  Updated GH_TOKEN in .env"
+          else
+            echo "" >> "$REPO_ROOT/.env"
+            echo "GH_TOKEN=${token}" >> "$REPO_ROOT/.env"
+            echo "  Added GH_TOKEN to .env"
+          fi
+        else
+          echo "GH_TOKEN=${token}" > "$REPO_ROOT/.env"
+          echo "  Created .env with GH_TOKEN"
+        fi
+
+        # 2. Inject into current Claude Code session
+        if [[ -n "${CLAUDE_ENV_FILE:-}" ]]; then
+          echo "export GH_TOKEN='${token}'" >> "$CLAUDE_ENV_FILE"
+          echo "  Injected into current session (CLAUDE_ENV_FILE)"
+        fi
+
+        # 3. Export for this script's remaining execution
+        export GH_TOKEN="$token"
+
+        # 4. Verify
+        echo ""
+        echo "  Verifying..."
+        verify_resp=$(api_get "${API}/rate_limit" 2>/dev/null || echo '{}')
+        verify_limit=$(echo "$verify_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('resources',{}).get('core',{}).get('limit',0))" 2>/dev/null || echo 0)
+        if [[ "$verify_limit" -gt 60 ]]; then
+          echo "  Token verified: authenticated ($verify_limit req/hr)"
+          echo ""
+          echo "  .env is gitignored — your token is safe."
+          echo "  Future sessions will auto-detect it from .env."
+        else
+          echo "  WARNING: token saved but not authenticating with GitHub." >&2
+          echo "  The token may be invalid, expired, or the API is rate-limited." >&2
+          echo "  It's saved in .env — verify later with: ./dev/gh-api.sh auth status" >&2
+        fi
+        ;;
+
+      remove)
+        if [[ -f "$REPO_ROOT/.env" ]] && grep -qE '^GH_TOKEN=' "$REPO_ROOT/.env"; then
+          sed -i '/^GH_TOKEN=/d' "$REPO_ROOT/.env"
+          echo "  Removed GH_TOKEN from .env"
+        else
+          echo "  No GH_TOKEN found in .env"
+        fi
+        unset GH_TOKEN 2>/dev/null || true
+        echo "  Unset GH_TOKEN from environment"
+        echo "  Note: restart your session for full effect"
+        ;;
+
+      *)
+        echo "Usage:" >&2
+        echo "  gh-api.sh auth              # show auth status" >&2
+        echo "  gh-api.sh auth status       # show auth status" >&2
+        echo "  gh-api.sh auth set <token>  # save token to .env" >&2
+        echo "  gh-api.sh auth remove       # remove saved token" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
   # ── Rate limit ──────────────────────────────────────────────────────────────
   rate-limit)
     api_get "${API}/rate_limit" | python3 -c "
@@ -743,6 +915,10 @@ print(f'\n  Mode: {auth}')
     echo "  Proxy:      $PROXY"
     echo "  Repository: $OWNER_REPO"
     echo "  GH_TOKEN:   ${GH_TOKEN:+set (write ops enabled)}${GH_TOKEN:-not set (read-only mode)}"
+    if [[ -z "${GH_TOKEN:-}" ]]; then
+      echo ""
+      echo "  Run './dev/gh-api.sh auth set <token>' to enable write operations."
+    fi
     ;;
 
   *)
