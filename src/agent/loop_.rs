@@ -1,6 +1,7 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::{
-    Config, QueryClassificationConfig, SkillsPromptInjectionMode, ToolProfile, ToolProfileName,
+    Config, EstopConfig, QueryClassificationConfig, SkillsPromptInjectionMode, ToolProfile,
+    ToolProfileName,
 };
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::multimodal;
@@ -750,6 +751,7 @@ pub(crate) async fn agent_turn(
         &[],
         None,
         0,
+        None,
     )
     .await
 }
@@ -775,6 +777,7 @@ pub(crate) async fn run_tool_call_loop_with_reply_target(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    estop: Option<(&EstopConfig, &std::path::Path)>,
 ) -> Result<String> {
     TOOL_LOOP_REPLY_TARGET
         .scope(
@@ -798,6 +801,7 @@ pub(crate) async fn run_tool_call_loop_with_reply_target(
                 excluded_tools,
                 None,
                 0,
+                estop,
             ),
         )
         .await
@@ -824,6 +828,7 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
     safety_heartbeat: Option<SafetyHeartbeatConfig>,
+    estop: Option<(&EstopConfig, &std::path::Path)>,
 ) -> Result<String> {
     let reply_target = non_cli_approval_context
         .as_ref()
@@ -855,6 +860,7 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
                         excluded_tools,
                         None,
                         0,
+                        estop,
                     ),
                 ),
             ),
@@ -896,6 +902,7 @@ pub(crate) async fn run_tool_call_loop(
     excluded_tools: &[String],
     allowed_tools: Option<&[String]>,
     max_tool_calls_per_turn: usize,
+    estop: Option<(&EstopConfig, &std::path::Path)>,
 ) -> Result<String> {
     let non_cli_approval_context = TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT
         .try_with(Clone::clone)
@@ -1522,6 +1529,64 @@ pub(crate) async fn run_tool_call_loop(
                 }
             }
 
+            // ── E-stop check ─────────────────────────────────────
+            if let Some((estop_cfg, estop_dir)) = estop {
+                if crate::security::is_kill_all_engaged(estop_cfg, estop_dir) {
+                    let msg = "Emergency stop (kill-all) engaged. All tools blocked. \
+                         Use `zeroclaw estop status` to check state, \
+                         `zeroclaw estop resume` to disengage."
+                        .to_string();
+                    runtime_trace::record_event(
+                        "estop_blocked",
+                        Some(channel_name),
+                        Some(provider_name),
+                        Some(model),
+                        Some(&turn_id),
+                        Some(false),
+                        Some("kill-all e-stop engaged, breaking tool loop"),
+                        serde_json::json!({
+                            "iteration": iteration + 1,
+                            "level": "kill_all",
+                        }),
+                    );
+                    history.push(ChatMessage::user(msg.clone()));
+                    anyhow::bail!("{msg}");
+                }
+                if let Some(reason) =
+                    crate::security::check_tool_blocked(estop_cfg, estop_dir, &tool_name)
+                {
+                    let blocked = format!(
+                        "E-stop: tool '{tool_name}' blocked — {reason}. \
+                         Use `zeroclaw estop status` to check state."
+                    );
+                    runtime_trace::record_event(
+                        "estop_blocked",
+                        Some(channel_name),
+                        Some(provider_name),
+                        Some(model),
+                        Some(&turn_id),
+                        Some(false),
+                        Some(&reason),
+                        serde_json::json!({
+                            "iteration": iteration + 1,
+                            "tool": tool_name.clone(),
+                            "reason": &reason,
+                        }),
+                    );
+                    ordered_results[idx] = Some((
+                        tool_name.clone(),
+                        call.tool_call_id.clone(),
+                        ToolExecutionOutcome {
+                            output: blocked.clone(),
+                            success: false,
+                            error_reason: Some(blocked),
+                            duration: Duration::ZERO,
+                        },
+                    ));
+                    continue;
+                }
+            }
+
             let signature = tool_call_signature(&tool_name, &tool_args);
             if !seen_tool_signatures.insert(signature) {
                 let duplicate = format!(
@@ -1985,11 +2050,7 @@ pub async fn run(
         .or(config.default_model.as_deref())
         .unwrap_or("anthropic/claude-sonnet-4");
 
-    let available_hints: Vec<String> = config
-        .model_routes
-        .iter()
-        .map(|r| r.hint.clone())
-        .collect();
+    let available_hints: Vec<String> = config.model_routes.iter().map(|r| r.hint.clone()).collect();
 
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
@@ -2214,6 +2275,15 @@ pub async fn run(
     };
     let channel_name = if interactive { "cli" } else { "daemon" };
 
+    let estop_config_dir = config.config_path.parent().map(|p| p.to_path_buf());
+    let estop_ctx = if config.security.estop.enabled {
+        estop_config_dir
+            .as_deref()
+            .map(|dir| (&config.security.estop, dir))
+    } else {
+        None
+    };
+
     // ── Execute ──────────────────────────────────────────────────
     let start = Instant::now();
 
@@ -2297,6 +2367,7 @@ pub async fn run(
                         &[],
                         classification.tool_filter.as_deref(),
                         config.agent.max_tool_calls_per_turn,
+                        estop_ctx,
                     ),
                 ),
             )
@@ -2471,6 +2542,7 @@ pub async fn run(
                             &[],
                             classification.tool_filter.as_deref(),
                             config.agent.max_tool_calls_per_turn,
+                            estop_ctx,
                         ),
                     ),
                 )
@@ -2594,11 +2666,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
 
-    let available_hints: Vec<String> = config
-        .model_routes
-        .iter()
-        .map(|r| r.hint.clone())
-        .collect();
+    let available_hints: Vec<String> = config.model_routes.iter().map(|r| r.hint.clone()).collect();
 
     let provider_runtime_options = providers::ProviderRuntimeOptions {
         auth_profile_override: None,
@@ -2750,10 +2818,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &available_hints,
     );
     classification.log_cascade_routing(&model_name);
-    let effective_model = classification
-        .model_hint
-        .as_deref()
-        .unwrap_or(&model_name);
+    let effective_model = classification.model_hint.as_deref().unwrap_or(&model_name);
 
     let mut history = vec![
         ChatMessage::system(&system_prompt),
@@ -2765,6 +2830,14 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
             body: security.summary_for_heartbeat(),
             interval: config.agent.safety_heartbeat_interval,
         })
+    } else {
+        None
+    };
+    let estop_config_dir = config.config_path.parent().map(|p| p.to_path_buf());
+    let estop_ctx = if config.security.estop.enabled {
+        estop_config_dir
+            .as_deref()
+            .map(|dir| (&config.security.estop, dir))
     } else {
         None
     };
@@ -2790,6 +2863,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
                 &[],
                 classification.tool_filter.as_deref(),
                 0,
+                estop_ctx,
             ),
         )
         .await
@@ -2798,9 +2872,9 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ClassificationRule;
     use async_trait::async_trait;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use crate::config::ClassificationRule;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3203,6 +3277,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -3240,6 +3315,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("anthropic route should not fail on a false-negative vision capability probe");
@@ -3286,6 +3362,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect_err("oversized payload must fail");
@@ -3328,6 +3405,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -3456,6 +3534,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("parallel execution should complete");
@@ -3529,6 +3608,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("tool loop should complete with denied tool execution");
@@ -3587,6 +3667,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("tool loop should consume non-cli session grants");
@@ -3669,6 +3750,7 @@ mod tests {
             None,
             &[],
             None,
+            None,
         )
         .await
         .expect("tool loop should continue after non-cli approval");
@@ -3729,6 +3811,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("tool loop should consume one-time allow-all token");
@@ -3786,6 +3869,7 @@ mod tests {
             &excluded_tools,
             None,
             0,
+            None,
         )
         .await
         .expect("tool loop should complete with blocked tool execution");
@@ -3852,6 +3936,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -3910,6 +3995,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("native fallback id flow should complete");
@@ -3971,6 +4057,7 @@ mod tests {
             &[],
             None,
             0,
+            None,
         )
         .await
         .expect("loop should recover after one deferred-action reply");
@@ -5837,4 +5924,140 @@ Let me check the result."#;
         assert!(result.tool_filter.is_some());
     }
 
+    #[tokio::test]
+    async fn estop_kill_all_stops_tool_loop() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"echo_tool","arguments":{"value":"hello"}}
+</tool_call>"#,
+            "done",
+        ]);
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "echo_tool",
+            Arc::clone(&invocations),
+        ))];
+        let mut history = vec![ChatMessage::system("test"), ChatMessage::user("run tool")];
+        let observer = NoopObserver;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let estop_cfg = crate::config::EstopConfig {
+            enabled: true,
+            state_file: state_path.display().to_string(),
+            require_otp_to_resume: false,
+        };
+        let mut manager = crate::security::EstopManager::load(&estop_cfg, dir.path()).unwrap();
+        manager
+            .engage(crate::security::EstopLevel::KillAll)
+            .unwrap();
+
+        let err = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            0,
+            Some((&estop_cfg, dir.path())),
+        )
+        .await
+        .expect_err("kill-all should cause tool loop to bail");
+
+        assert!(err.to_string().contains("Emergency stop"));
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "tool should not have been executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn estop_frozen_tool_skips_one() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"echo_tool","arguments":{"value":"blocked"}}
+</tool_call>
+<tool_call>
+{"name":"counting_tool","arguments":{"value":"allowed"}}
+</tool_call>"#,
+            "done",
+        ]);
+        let echo_invocations = Arc::new(AtomicUsize::new(0));
+        let counting_invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![
+            Box::new(CountingTool::new(
+                "echo_tool",
+                Arc::clone(&echo_invocations),
+            )),
+            Box::new(CountingTool::new(
+                "counting_tool",
+                Arc::clone(&counting_invocations),
+            )),
+        ];
+        let mut history = vec![ChatMessage::system("test"), ChatMessage::user("run tools")];
+        let observer = NoopObserver;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let estop_cfg = crate::config::EstopConfig {
+            enabled: true,
+            state_file: state_path.display().to_string(),
+            require_otp_to_resume: false,
+        };
+        let mut manager = crate::security::EstopManager::load(&estop_cfg, dir.path()).unwrap();
+        manager
+            .engage(crate::security::EstopLevel::ToolFreeze(vec![
+                "echo_tool".into()
+            ]))
+            .unwrap();
+
+        let result = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            0,
+            Some((&estop_cfg, dir.path())),
+        )
+        .await
+        .expect("loop should complete despite frozen tool");
+
+        assert_eq!(result, "done");
+        assert_eq!(
+            echo_invocations.load(Ordering::SeqCst),
+            0,
+            "frozen tool should not execute"
+        );
+        assert_eq!(
+            counting_invocations.load(Ordering::SeqCst),
+            1,
+            "non-frozen tool should execute"
+        );
+    }
 }

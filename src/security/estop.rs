@@ -214,6 +214,50 @@ impl EstopManager {
         Ok(())
     }
 
+    pub fn reload_state(&mut self) -> Result<()> {
+        if !self.state_path.exists() {
+            self.state = EstopState::default();
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&self.state_path).with_context(|| {
+            format!(
+                "Failed to re-read estop state file {}",
+                self.state_path.display()
+            )
+        })?;
+        match serde_json::from_str::<EstopState>(&raw) {
+            Ok(mut parsed) => {
+                parsed.normalize();
+                self.state = parsed;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.state_path.display(),
+                    "Failed to parse estop state on reload; entering fail-closed mode: {error}"
+                );
+                self.state = EstopState::fail_closed();
+                self.persist_state()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_tool_blocked(&self, tool_name: &str) -> Option<String> {
+        if self.state.kill_all {
+            return Some("emergency stop (kill-all) is engaged".into());
+        }
+        let normalized = tool_name.trim().to_ascii_lowercase();
+        if self.state.frozen_tools.iter().any(|t| t == &normalized) {
+            return Some(format!("tool '{tool_name}' is frozen by e-stop"));
+        }
+        if self.state.network_kill && is_network_capable_tool(&normalized) {
+            return Some(format!(
+                "tool '{tool_name}' is blocked by network-kill e-stop"
+            ));
+        }
+        None
+    }
+
     fn persist_state(&mut self) -> Result<()> {
         if let Some(parent) = self.state_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -259,6 +303,46 @@ pub fn resolve_state_file_path(config_dir: &Path, state_file: &str) -> PathBuf {
     } else {
         config_dir.join(path)
     }
+}
+
+pub fn check_tool_blocked(
+    config: &EstopConfig,
+    config_dir: &Path,
+    tool_name: &str,
+) -> Option<String> {
+    if !config.enabled {
+        return None;
+    }
+    match EstopManager::load(config, config_dir) {
+        Ok(mgr) => mgr.is_tool_blocked(tool_name),
+        Err(e) => {
+            tracing::error!("Failed to load estop state for tool check: {e}");
+            Some("emergency stop: unable to verify estop state (fail-closed)".into())
+        }
+    }
+}
+
+pub fn is_kill_all_engaged(config: &EstopConfig, config_dir: &Path) -> bool {
+    if !config.enabled {
+        return false;
+    }
+    match EstopManager::load(config, config_dir) {
+        Ok(mgr) => mgr.state.kill_all,
+        Err(_) => true, // fail-closed
+    }
+}
+
+const NETWORK_CAPABLE_TOOLS: &[&str] = &[
+    "browser",
+    "browser_open",
+    "http_request",
+    "web_fetch",
+    "web_search_tool",
+    "shell",
+];
+
+fn is_network_capable_tool(name: &str) -> bool {
+    NETWORK_CAPABLE_TOOLS.contains(&name)
 }
 
 fn normalize_tool_name(raw: &str) -> Result<String> {
@@ -418,5 +502,76 @@ mod tests {
             .resume(ResumeSelector::KillAll, Some(&code), Some(&validator))
             .unwrap();
         assert!(!manager.status().kill_all);
+    }
+
+    #[test]
+    fn is_tool_blocked_kill_all() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let cfg = estop_config(&state_path);
+        let mut manager = EstopManager::load(&cfg, dir.path()).unwrap();
+        manager.engage(EstopLevel::KillAll).unwrap();
+        assert!(manager.is_tool_blocked("shell").is_some());
+        assert!(manager.is_tool_blocked("file_read").is_some());
+        assert!(manager.is_tool_blocked("browser").is_some());
+    }
+
+    #[test]
+    fn is_tool_blocked_frozen_tool() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let cfg = estop_config(&state_path);
+        let mut manager = EstopManager::load(&cfg, dir.path()).unwrap();
+        manager
+            .engage(EstopLevel::ToolFreeze(vec!["shell".into()]))
+            .unwrap();
+        assert!(manager.is_tool_blocked("shell").is_some());
+        assert!(manager.is_tool_blocked("file_read").is_none());
+    }
+
+    #[test]
+    fn is_tool_blocked_network_kill() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let cfg = estop_config(&state_path);
+        let mut manager = EstopManager::load(&cfg, dir.path()).unwrap();
+        manager.engage(EstopLevel::NetworkKill).unwrap();
+        assert!(manager.is_tool_blocked("browser").is_some());
+        assert!(manager.is_tool_blocked("web_fetch").is_some());
+        assert!(manager.is_tool_blocked("http_request").is_some());
+        assert!(manager.is_tool_blocked("shell").is_some());
+        assert!(manager.is_tool_blocked("memory_recall").is_none());
+        assert!(manager.is_tool_blocked("file_read").is_none());
+    }
+
+    #[test]
+    fn is_tool_blocked_clear() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let cfg = estop_config(&state_path);
+        let manager = EstopManager::load(&cfg, dir.path()).unwrap();
+        assert!(manager.is_tool_blocked("shell").is_none());
+        assert!(manager.is_tool_blocked("browser").is_none());
+    }
+
+    #[test]
+    fn check_tool_blocked_with_enabled_config() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let cfg = estop_config(&state_path);
+        let mut manager = EstopManager::load(&cfg, dir.path()).unwrap();
+        manager.engage(EstopLevel::KillAll).unwrap();
+        let result = check_tool_blocked(&cfg, dir.path(), "shell");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn check_tool_blocked_disabled_config() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("estop-state.json");
+        let mut cfg = estop_config(&state_path);
+        cfg.enabled = false;
+        let result = check_tool_blocked(&cfg, dir.path(), "shell");
+        assert!(result.is_none());
     }
 }

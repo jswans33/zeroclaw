@@ -50,7 +50,9 @@ pub use audit::{AuditEvent, AuditEventType, AuditLogger};
 pub use detect::create_sandbox;
 pub use domain_matcher::DomainMatcher;
 #[allow(unused_imports)]
-pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};
+pub use estop::{
+    check_tool_blocked, is_kill_all_engaged, EstopLevel, EstopManager, EstopState, ResumeSelector,
+};
 #[allow(unused_imports)]
 pub use otp::OtpValidator;
 #[allow(unused_imports)]

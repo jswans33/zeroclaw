@@ -29,7 +29,10 @@ fn default_keyword_map() -> &'static KeywordMap {
             ),
             (
                 "file_edit",
-                ["edit", "fix", "change", "modify", "update", "refactor", "bug"].as_slice(),
+                [
+                    "edit", "fix", "change", "modify", "update", "refactor", "bug",
+                ]
+                .as_slice(),
             ),
             (
                 "memory_store",
@@ -65,11 +68,17 @@ fn default_keyword_map() -> &'static KeywordMap {
             ),
             (
                 "gpio_read",
-                ["gpio", "pin", "hardware", "sensor", "led", "arduino", "nucleo"].as_slice(),
+                [
+                    "gpio", "pin", "hardware", "sensor", "led", "arduino", "nucleo",
+                ]
+                .as_slice(),
             ),
             (
                 "gpio_write",
-                ["gpio", "pin", "hardware", "led", "blink", "arduino", "nucleo"].as_slice(),
+                [
+                    "gpio", "pin", "hardware", "led", "blink", "arduino", "nucleo",
+                ]
+                .as_slice(),
             ),
         ])
     })

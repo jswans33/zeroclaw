@@ -314,15 +314,15 @@ mod tests {
             enabled: true,
             rules: default_tool_classification_rules().to_vec(),
         };
-        let decision = classify_with_decision(&config, "hello")
-            .expect("should match simple greeting");
+        let decision =
+            classify_with_decision(&config, "hello").expect("should match simple greeting");
         assert_eq!(
             decision.tool_profile,
             Some(ToolProfile::Named(ToolProfileName::Minimal))
         );
 
-        let decision = classify_with_decision(&config, "what time is it?")
-            .expect("should match time query");
+        let decision =
+            classify_with_decision(&config, "what time is it?").expect("should match time query");
         assert_eq!(
             decision.tool_profile,
             Some(ToolProfile::Named(ToolProfileName::Minimal))
